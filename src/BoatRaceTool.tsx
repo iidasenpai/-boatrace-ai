@@ -1571,41 +1571,119 @@ setForecast(generateForecast(scored));
 
               {bets && (
                 <div>
-                  {bets.map((b, i) => (
-                    <div key={i} style={{
-                      display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                      background: '#131f2e', border: b.insurance ? '1px dashed #8ba3bd' : '1px solid #2a3d52', borderRadius: 6, padding: '8px 12px', marginBottom: 5,
-                    }}>
-                      <div style={{ fontWeight: 700, fontSize: 15 }}>
-                        {b.combo} {b.insurance && <span style={{ fontSize: 10, color: '#8ba3bd', fontWeight: 400 }}>(保険)</span>}
-                      </div>
-                      <div
-  style={{
-    flex: 1,
-    marginLeft: 10,
-    fontSize: 11,
-    color: '#8ba3bd',
-  }}
->
-  {b.insurance ? (
-    '1号艇飛び目'
-  ) : (
-    <>
-      <div>目安確率 {b.prob}%</div>
 
-      {b.odds !== null &&
-b.odds !== undefined ? (
-  <>
-    <div>
-      オッズ {b.odds}倍 ／ 期待値 {b.expectedValue}%
+                  {bets.map((b, i) => (
+  <div
+    key={i}
+    style={{
+      display: 'flex',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      background: '#131f2e',
+      borderRadius: 6,
+      padding: '10px 12px',
+      marginBottom: 6,
+    }}
+  >
+    <div style={{ fontWeight: 700 }}>
+      {b.combo} {b.insurance ? '（保険）' : ''}
     </div>
 
-    
-                  <div style={{ fontSize: 11, color: '#8ba3bd', marginTop: 6, textAlign: 'right' }}>
-                    合計 {bets.reduce((a, c) => a + c.yen, 0)}円
-                  </div>
-                </div>
-              )}
+    <div
+      style={{
+        flex: 1,
+        marginLeft: 10,
+        fontSize: 11,
+        color: '#8ba3bd',
+      }}
+    >
+      {b.insurance ? (
+        <div>1号艇飛び目</div>
+      ) : (
+        <>
+          <div>目安確率 {b.prob}%</div>
+
+          {b.odds !== null &&
+          b.odds !== undefined ? (
+            <>
+              <div>
+                オッズ {b.odds}倍 ／ 期待値 {b.expectedValue}%
+              </div>
+
+              <div
+                style={{
+                  marginTop: 2,
+                  fontWeight: 700,
+                  color:
+                    b.expectedValue >= 110
+                      ? '#7aff9b'
+                      : b.expectedValue >= 100
+                        ? '#ffd54a'
+                        : '#ff8080',
+                }}
+              >
+                {b.evLabel}
+
+                {b.expectedProfit !== null &&
+                  ` ／ 期待収支 ${
+                    b.expectedProfit >= 0 ? '+' : ''
+                  }${b.expectedProfit}円`}
+              </div>
+            </>
+          ) : (
+            <div>個別オッズ未取得</div>
+          )}
+
+          {b.returnExpectationLevel !== 'none' && (
+            <div
+              style={{
+                marginTop: 4,
+                fontWeight: 800,
+                color:
+                  b.returnExpectationLevel === 'high'
+                    ? '#7aff9b'
+                    : b.returnExpectationLevel === 'standard'
+                      ? '#ffd54a'
+                      : '#ff8080',
+              }}
+            >
+              {b.returnExpectationLevel === 'high' && '🟢 '}
+              {b.returnExpectationLevel === 'standard' && '🟡 '}
+              {b.returnExpectationLevel === 'low' && '🔴 '}
+
+              回収率期待：{b.returnExpectationLabel}
+
+              {b.returnExpectationScore !== null &&
+                `（参考${b.returnExpectationScore}）`}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+
+    <div
+      style={{
+        fontWeight: 700,
+        fontSize: 14,
+        color: '#e8b800',
+      }}
+    >
+      {b.yen}円
+    </div>
+  </div>
+))}
+
+                  <div
+  style={{
+    fontSize: 11,
+    color: '#8ba3bd',
+    marginTop: 6,
+    textAlign: 'right',
+  }}
+>
+  合計 {bets.reduce((a, c) => a + c.yen, 0)}円
+</div>
+                  
             </div>
 
             {/* Ana (longshot) bets */}
