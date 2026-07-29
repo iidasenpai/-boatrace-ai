@@ -1660,7 +1660,84 @@ setForecast(generateForecast(scored));
           </div>
         </>
       ) : (
-        <div>オッズ未取得・期待値計算なし</div>
+        <div
+  style={{
+    flex: 1,
+    marginLeft: 10,
+    fontSize: 11,
+    color: '#8ba3bd',
+  }}
+>
+  {b.insurance ? (
+    <div>1号艇飛び目</div>
+  ) : (
+    <>
+      <div>目安確率 {b.prob}%</div>
+
+      {b.odds !== null &&
+      b.odds !== undefined ? (
+        <>
+          <div>
+            オッズ {b.odds}倍 ／
+            期待値 {b.expectedValue}%
+          </div>
+
+          <div
+            style={{
+              marginTop: 2,
+              fontWeight: 700,
+              color:
+                b.expectedValue >= 110
+                  ? '#7aff9b'
+                  : b.expectedValue >= 100
+                    ? '#ffd54a'
+                    : '#ff8080',
+            }}
+          >
+            {b.evLabel}
+
+            {b.expectedProfit !== null &&
+              ` ／ 期待収支 ${
+                b.expectedProfit >= 0
+                  ? '+'
+                  : ''
+              }${b.expectedProfit}円`}
+          </div>
+        </>
+      ) : (
+        <div>個別オッズ未取得</div>
+      )}
+
+      {b.returnExpectationLevel !==
+        'none' && (
+        <div
+          style={{
+            marginTop: 4,
+            fontWeight: 800,
+            color:
+              b.returnExpectationLevel ===
+              'high'
+                ? '#7aff9b'
+                : b.returnExpectationLevel ===
+                    'standard'
+                  ? '#ffd54a'
+                  : '#ff8080',
+          }}
+        >
+          {b.returnExpectationLevel ===
+            'high' && '🟢 '}
+          {b.returnExpectationLevel ===
+            'standard' && '🟡 '}
+          {b.returnExpectationLevel ===
+            'low' && '🔴 '}
+
+          回収率期待：
+          {b.returnExpectationLabel}
+
+          {b.returnExpectationScore !==
+            null &&
+            `（参考${b.returnExpectationScore}）`}
+        </div>
       )}
     </>
   )}
