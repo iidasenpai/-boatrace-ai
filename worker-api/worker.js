@@ -79,9 +79,11 @@ export default {
   "raceNumber": "",
   "date": "",
   "weather": {
-  "condition": "",
-  "windDirection": "",
+  "condition": "天候",
+  "temp": null,
+  "windDirection": "風向",
   "windSpeed": null,
+  "waterTemp": null,
   "waveHeight": null
 },
 "odds": {},
@@ -114,6 +116,11 @@ export default {
   ],
   "warnings": []
 }
+
+天気・気象情報が画像内にある場合は、トップレベルのweatherへ必ず格納してください。
+気温はtemp、風向はwindDirection、風速はwindSpeed、水温はwaterTemp、波高はwaveHeightです。
+単位記号（℃、m、cm）は付けず数値型で返してください。読めない項目だけnullにしてください。
+「展示情報」や「直前情報」画面の上部・下部に小さく表示される場合も見落とさないでください。
 
 オッズ画像に3連単オッズがある場合は、トップレベルのoddsへ格納してください。
 キーは必ず「1-2-3」のような半角数字とハイフンにしてください。
