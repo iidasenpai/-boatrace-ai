@@ -952,7 +952,10 @@ export default function BoatRaceTool() {
     setImageError('');
     try {
       const result = await callVisionAPI(images);
-      const normalized = normalizeAIBoats(result.boats);
+      const normalized = normalizeAIBoats(
+  result.boats,
+  result.odds
+);
       const scored = computeScores(normalized, venue, result.weather || null);
       setBoats(scored);
 setWeather(result.weather || null);
