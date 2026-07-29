@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { computeScores } from './scoring';
 
 const VENUES = [
   '桐生','戸田','江戸川','平和島','多摩川','浜名湖','蒲郡','常滑',
@@ -153,127 +154,6 @@ function mergeBoats(racelist, beforeInfo, startDisp) {
   });
 }
 
-// ---------- Scoring ----------
-
-function norm(v, arr, invert = false) {
-  const clean = arr.filter(x => x != null && !isNaN(x));
-  if (v == null || isNaN(v) || clean.length === 0) return 50;
-  const min = Math.min(...clean), max = Math.max(...clean);
-  if (max === min) return 50;
-  const s = ((v - min) / (max - min)) * 100;
-  return invert ? 100 - s : s;
-}
-
-const CLASS_BASE = { 'A1': 100, 'A2': 66, 'B1': 33, 'B2': 10 };
-
-function computeScores(boats, weather) {
-  const nat2Arr = boats.map(b => b.nat2);
-  const loc2Arr = boats.map(b => b.loc2);
-  const motor2Arr = boats.map(b => b.motor2);
-  const boat2Arr = boats.map(b => b.boat2);
-  const exTimeArr = boats.map(b => b.exTime);
-  // 展示ST(スタート展示の実測タイミング)。展示タイム(直線速度)とは別物で、
-  // 逃げ・チルト評価と関連が深いのに今まで加点対象になっていなかったため軸として追加。
-  const exSTArr = boats.map(b => b.exST);
-  // 今節成績: テキスト貼り付けでは着順が取れないため平均ST(スタートの安定感)のみの軽い補正だったが、
-  // 画像解析経由で着順(finish)が取れる場合は、そちらを優先してより意味のある補正に切り替える。
-  const konsetsuSTArr = boats.map(b => b.konsetsuAvgST);
-  const konsetsuFinishArr = boats.map(b => {
-    const finishes = (b.konsetsu || []).filter(e => e.finish != null).map(e => e.finish);
-    return finishes.length ? finishes.reduce((a, c) => a + c, 0) / finishes.length : null;
-  });
-
-  // 大荒れ想定: field-wide F count, non-F boats get a clean-start bonus
-  const fCount = boats.filter(b => b.exhibitF).length;
-  const isChaosRace = fCount >= 4;
-
-  // 外枠エース: sole A1 racer sitting in an outside lane (4-6) against a weaker field
-  const a1Boats = boats.filter(b => b.classG === 'A1');
-
-  // 荒天判定: 風速5m以上 or 波高3cm以上 → 1コース優位が効きにくい
-  const windVal = weather ? parseFloat(weather.wind) : 0;
-  const waveVal = weather ? parseFloat(weather.wave) : 0;
-  const isRoughWater = windVal >= 5 || waveVal >= 3;
-
-  const courseW = isRoughWater ? 0.18 : 0.30;
-  const playerW = isRoughWater ? 0.28 : 0.22;
-  const gearW = isRoughWater ? 0.24 : 0.20;
-  // 展示タイム(直線速度)と展示ST(実測スタートタイミング)で重みを分け合う。
-  // 元は展示タイムのみに0.15を割り当てていたが、STの方が逃げ足の信頼度に直結するため半分ずつに分割。
-  const exW = 0.08;
-  const stW = 0.07;
-  const classW = isRoughWater ? 0.15 : 0.15;
-
-  // 先に全艇のgearScoreを算出しておき、外枠機力エース判定に使う
-  // (courseWの重みでgearが良い外枠艇が過小評価される事例が実戦で複数確認されたための追加軸)
-  const gearScoreArr = boats.map(b => norm(b.motor2, motor2Arr) * 0.6 + norm(b.boat2, boat2Arr) * 0.4);
-  const sortedGear = [...gearScoreArr].sort((a, b) => b - a);
-  const topGear = sortedGear[0];
-  const secondGear = sortedGear[1] ?? 0;
-
-  const scored = boats.map((b, i) => {
-    const playerScore = norm(b.nat2, nat2Arr) * 0.5 + norm(b.loc2, loc2Arr) * 0.5;
-    const gearScore = gearScoreArr[i];
-    const exScore = norm(b.exTime, exTimeArr, true);
-    const stScore = norm(b.exST, exSTArr, true);
-    const courseScore = (COURSE_BASE[b.entryCourse] || 0.03) * 100;
-    const classScore = CLASS_BASE[b.classG] || 30;
-
-    let fPenalty = 0;
-    if (b.exhibitF) {
-      fPenalty = b.entryCourse === 1 ? 5 : 15;
-      if (gearScore >= 65) fPenalty *= 0.5;
-      // Fが複数艇いる日はF単体の予測力が下がるため、段階的に緩和
-      fPenalty *= Math.max(0.4, 1 - fCount / 10);
-    }
-
-    let cleanStartBonus = 0;
-    if (isChaosRace && !b.exhibitF) cleanStartBonus = 12;
-
-    let outerAceBonus = 0;
-    const isOuterAce = b.classG === 'A1' && b.entryCourse >= 4 && a1Boats.length === 1;
-    if (isOuterAce) outerAceBonus = 8;
-
-    // 外枠機力エース: 4-6コースの艇が全艇中トップの機力(モーター/ボート)を持ち、
-    // 2番手と明確な差(8pt以上)がある場合、まくり・まくり差しの温床としてボーナス
-    // (courseW偏重で機力突出艇が沈む実戦例が複数あったための補正軸)
-    let outerGearBonus = 0;
-    const isOuterGearAce = b.entryCourse >= 4 && gearScore === topGear && gearScore >= 60 && (topGear - secondGear) >= 8;
-    if (isOuterGearAce) outerGearBonus = 7;
-
-    // チルト×進入コースの相性: 1コース×出足型(下向き)、外枠×伸び型(上向き)を評価
-    let tiltBonus = 0;
-    if (b.tilt != null) {
-      if (b.entryCourse === 1 && b.tilt < 0) tiltBonus = 6;
-      else if (b.entryCourse >= 4 && b.tilt > 0) tiltBonus = 6;
-    }
-
-    // 部品交換あり: 調整が間に合っていない可能性があり不確実要素として減点(軽め)
-    const partsPenalty = b.partsExchanged ? 2 : 0;
-
-    // 今節成績の補正: 着順(finish)が取れていれば平均着順を最大±8点で反映(信頼度が高い実データのため)。
-    // 着順が無い(テキスト貼り付け由来)場合のみ、平均STを最大±3点の弱い代替補正として使う。
-    const avgFinish = konsetsuFinishArr[i];
-    let konsetsuScore = null;
-    let konsetsuBonus = 0;
-    if (avgFinish != null) {
-      konsetsuScore = norm(avgFinish, konsetsuFinishArr, true);
-      konsetsuBonus = (konsetsuScore - 50) * 0.16;
-    } else if (b.konsetsuAvgST != null) {
-      konsetsuScore = norm(b.konsetsuAvgST, konsetsuSTArr, true);
-      konsetsuBonus = (konsetsuScore - 50) * 0.06;
-    }
-
-    const total = playerScore * playerW + gearScore * gearW + courseScore * courseW + exScore * exW + stScore * stW + classScore * classW
-      - fPenalty + cleanStartBonus + outerAceBonus + outerGearBonus + tiltBonus - partsPenalty + konsetsuBonus;
-    return { ...b, playerScore, gearScore, exScore, stScore, courseScore, classScore, fPenalty, cleanStartBonus, outerAceBonus, outerGearBonus, isOuterGearAce, tiltBonus, partsPenalty, konsetsuScore, konsetsuBonus, konsetsuAvgFinish: avgFinish, total, isChaosRace, isOuterAce, isRoughWater };
-  });
-
-  scored.sort((a, b) => b.total - a.total);
-  const marks = ['◎', '○', '▲', '△', '△', '△'];
-  return scored.map((b, i) => ({ ...b, mark: marks[i], rank: i + 1 }));
-}
-
 // ---------- Bet recommendation (Plackett-Luce) ----------
 
 function permutations3(indices) {
@@ -348,6 +228,283 @@ function generateBets(boats, betType, budgetYen) {
 
   return result;
 }
+
+function normalizeOddsValue(value) {
+  if (
+    value === null ||
+    value === undefined ||
+    value === ''
+  ) {
+    return null;
+  }
+
+  const cleaned = String(value)
+    .replace(/倍/g, '')
+    .replace(/,/g, '')
+    .trim();
+
+  const number = Number(cleaned);
+
+  return Number.isFinite(number) && number > 0
+    ? number
+    : null;
+}
+
+function normalizeReturnRate(value) {
+  if (
+    value === null ||
+    value === undefined ||
+    value === ''
+  ) {
+    return null;
+  }
+
+  const cleaned = String(value)
+    .replace(/[％%]/g, '')
+    .replace(/,/g, '')
+    .trim();
+
+  const number = Number(cleaned);
+
+  return Number.isFinite(number)
+    ? number
+    : null;
+}
+
+function collectOddsMap(boats) {
+  const oddsMap = {};
+
+  boats.forEach((boat) => {
+    const source = boat?.odds;
+
+    if (
+      !source ||
+      typeof source !== 'object' ||
+      Array.isArray(source)
+    ) {
+      return;
+    }
+
+    Object.entries(source).forEach(
+      ([combo, value]) => {
+        const odds = normalizeOddsValue(value);
+
+        if (odds !== null) {
+          const normalizedCombo = String(combo)
+            .replace(/[‐-‒–—−ー]/g, '-')
+            .replace(/\s/g, '');
+
+          oddsMap[normalizedCombo] = odds;
+        }
+      }
+    );
+  });
+
+  return oddsMap;
+}
+
+function collectPositionReturns(boats) {
+  const source = boats.find(
+    (boat) =>
+      boat?.positionReturns &&
+      typeof boat.positionReturns === 'object'
+  )?.positionReturns;
+
+  if (!source) {
+    return {
+      first: {},
+      second: {},
+      third: {},
+    };
+  }
+
+  return {
+    first:
+      source.first &&
+      typeof source.first === 'object'
+        ? source.first
+        : {},
+
+    second:
+      source.second &&
+      typeof source.second === 'object'
+        ? source.second
+        : {},
+
+    third:
+      source.third &&
+      typeof source.third === 'object'
+        ? source.third
+        : {},
+  };
+}
+
+function calculateReturnExpectation(
+  combo,
+  positionReturns
+) {
+  const lanes = String(combo)
+    .replace(/[‐-‒–—−ー]/g, '-')
+    .split('-')
+    .map((value) => Number(value));
+
+  if (
+    lanes.length !== 3 ||
+    lanes.some((lane) => !Number.isFinite(lane))
+  ) {
+    return {
+      score: null,
+      label: 'データなし',
+      level: 'none',
+      details: null,
+    };
+  }
+
+  const [firstLane, secondLane, thirdLane] =
+    lanes;
+
+  const first = normalizeReturnRate(
+    positionReturns.first?.[String(firstLane)]
+  );
+
+  const second = normalizeReturnRate(
+    positionReturns.second?.[
+      String(secondLane)
+    ]
+  );
+
+  const third = normalizeReturnRate(
+    positionReturns.third?.[String(thirdLane)]
+  );
+
+  const values = [first, second, third].filter(
+    (value) => value !== null
+  );
+
+  if (values.length < 3) {
+    return {
+      score: null,
+      label: 'データなし',
+      level: 'none',
+      details: null,
+    };
+  }
+
+  /*
+   * 1着50%・2着30%・3着20%で評価。
+   * 1着固定回収率を最も重く扱う。
+   */
+  const score =
+    first * 0.5 +
+    second * 0.3 +
+    third * 0.2;
+
+  let label;
+  let level;
+
+  if (score >= 120) {
+    label = '高';
+    level = 'high';
+  } else if (score >= 80) {
+    label = '標準';
+    level = 'standard';
+  } else {
+    label = '低';
+    level = 'low';
+  }
+
+  return {
+    score: Math.round(score * 10) / 10,
+    label,
+    level,
+    details: {
+      first,
+      second,
+      third,
+    },
+  };
+}
+
+function addExpectedValueToBets(bets, boats) {
+  if (!Array.isArray(bets)) return [];
+
+  const oddsMap = collectOddsMap(boats);
+  const positionReturns =
+    collectPositionReturns(boats);
+
+  return bets.map((bet) => {
+    const normalizedCombo = String(bet.combo)
+      .replace(/[‐-‒–—−ー]/g, '-')
+      .replace(/\s/g, '');
+
+    const odds =
+      oddsMap[normalizedCombo] ?? null;
+
+    const probability =
+      typeof bet.prob === 'number'
+        ? bet.prob / 100
+        : null;
+
+    const expectedValue =
+      odds !== null && probability !== null
+        ? probability * odds * 100
+        : null;
+
+    const expectedProfit =
+      expectedValue !== null
+        ? Math.round(
+            bet.yen *
+              (expectedValue / 100 - 1)
+          )
+        : null;
+
+    let evLabel = 'オッズ未取得';
+
+    if (expectedValue !== null) {
+      if (expectedValue >= 130) {
+        evLabel = '強く買い候補';
+      } else if (expectedValue >= 110) {
+        evLabel = '買い候補';
+      } else if (expectedValue >= 100) {
+        evLabel = '検討候補';
+      } else {
+        evLabel = '見送り候補';
+      }
+    }
+
+    const returnExpectation =
+      calculateReturnExpectation(
+        normalizedCombo,
+        positionReturns
+      );
+
+    return {
+      ...bet,
+      odds,
+
+      expectedValue:
+        expectedValue !== null
+          ? Math.round(expectedValue)
+          : null,
+
+      expectedProfit,
+      evLabel,
+
+      returnExpectationScore:
+        returnExpectation.score,
+
+      returnExpectationLabel:
+        returnExpectation.label,
+
+      returnExpectationLevel:
+        returnExpectation.level,
+
+      returnExpectationDetails:
+        returnExpectation.details,
+    };
+  });
+}
+  
 
 function findAnaCandidate(boats) {
   const outer = boats.filter(b => b.rank >= 4);
@@ -466,11 +623,32 @@ function generateForecast(boats) {
   return lines;
 }
 
+
+// 通常ブラウザ用ストレージ互換レイヤー
+const browserStorage = {
+  async get(key) {
+    const value = window.localStorage.getItem(key);
+    return value == null ? null : { value };
+  },
+  async set(key, value) {
+    window.localStorage.setItem(key, value);
+    return { ok: true };
+  },
+  async list(prefix = '') {
+    const keys = [];
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const key = window.localStorage.key(i);
+      if (key && key.startsWith(prefix)) keys.push(key);
+    }
+    return { keys };
+  },
+};
+
 // ---------- Storage helpers ----------
 
 async function loadJSON(key, fallback) {
   try {
-    const res = await window.storage.get(key, false);
+    const res = await browserStorage.get(key, false);
     return res ? JSON.parse(res.value) : fallback;
   } catch (e) {
     return fallback;
@@ -478,7 +656,7 @@ async function loadJSON(key, fallback) {
 }
 async function saveJSON(key, value) {
   const attempt = async () => {
-    const result = await window.storage.set(key, JSON.stringify(value), false);
+    const result = await browserStorage.set(key, JSON.stringify(value), false);
     if (!result) throw new Error('storage.set returned empty result');
     return result;
   };
@@ -501,12 +679,12 @@ async function saveJSON(key, value) {
 
 async function loadAllRaces() {
   try {
-    const listRes = await window.storage.list('boatrace:races:', false);
+    const listRes = await browserStorage.list('boatrace:races:', false);
     if (!listRes || !Array.isArray(listRes.keys)) return [];
     const all = [];
     for (const key of listRes.keys) {
       try {
-        const res = await window.storage.get(key, false);
+        const res = await browserStorage.get(key, false);
         if (res && res.value) {
           const races = JSON.parse(res.value);
           if (Array.isArray(races)) {
@@ -714,115 +892,168 @@ const VISION_PROMPT = `あなたは競艇(ボートレース)の出走表・直�
 boatsは必ずlane 1〜6の6艇分を含めてください。今節成績の着順は色付きの丸数字や下線付き数字として表示されていることが多いので、見えている範囲はできるだけ拾ってください。`;
 
 async function callVisionAPI(images) {
-  const content = [
-    ...images.map(img => ({ type: 'image', source: { type: 'base64', media_type: img.mediaType, data: img.base64 } })),
-    { type: 'text', text: VISION_PROMPT },
-  ];
-  const body = JSON.stringify({
-    model: 'claude-sonnet-4-6',
-    max_tokens: 4000,
-    messages: [{ role: 'user', content }],
-  });
+  const response = await fetch(
+    'https://geminiapikey.uimaru02.workers.dev',
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        images: images.map(image => ({
+          mimeType: image.mediaType,
+          data: image.base64,
+        })),
+      }),
+    }
+  );
 
-  const attemptFetch = async () => {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 60000);
-    let response;
-    try {
-      response = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body,
-        signal: controller.signal,
-      });
-    } catch (e) {
-      clearTimeout(timeoutId);
-      if (e.name === 'AbortError') throw new Error('通信がタイムアウトしました(60秒)。画像の枚数を減らすかWi-Fi環境で再試行してください');
-      throw new Error('通信に失敗しました(ネットワークエラー)。電波状況を確認し、枚数を減らして再試行してください');
-    }
-    clearTimeout(timeoutId);
+  const result = await response.json();
 
-    if (!response.ok) {
-      let detail = '';
-      try { detail = (await response.text()).slice(0, 200); } catch (e) { /* ignore */ }
-      throw new Error(`APIエラー(${response.status})${detail ? ': ' + detail : ''}`);
-    }
-    // response.json()を直接呼ぶとSafariでレスポンス内容によっては
-    // 汎用DOMException("The string did not match the expected pattern")になり
-    // 原因が分からなくなることがあるため、一度text()で受けてから手動でJSON.parseする。
-    let rawText;
-    try {
-      rawText = await response.text();
-    } catch (e) {
-      throw new Error('APIレスポンスの読み取りに失敗しました');
-    }
-    if (!rawText || !rawText.trim()) {
-      // まれに本文が空で返ってくることがある(通信の瞬断など)。再試行の対象にする。
-      throw new Error('EMPTY_RESPONSE');
-    }
-    return rawText;
-  };
-
-  let rawText;
-  try {
-    rawText = await attemptFetch();
-  } catch (firstErr) {
-    // 1回だけ自動リトライ(モバイル回線の瞬断・空応答対策)
-    try {
-      rawText = await attemptFetch();
-    } catch (secondErr) {
-      if (secondErr.message === 'EMPTY_RESPONSE') {
-        throw new Error('サーバーから空の応答が返ってきました。もう一度「画像を解析する」を押して再試行してください');
-      }
-      throw secondErr;
-    }
+  if (!response.ok || !result.success) {
+    throw new Error(
+      result.details ||
+      result.error ||
+      '画像解析APIでエラーが発生しました'
+    );
   }
 
-  let data;
-  try {
-    data = JSON.parse(rawText);
-  } catch (e) {
-    throw new Error(`APIレスポンスがJSONではありません: ${rawText.slice(0, 200)}`);
-  }
-  const text = (data.content || []).map(item => item.text || '').join('\n');
-  const clean = text.replace(/```json|```/g, '').trim();
-  let parsed;
-  try {
-    parsed = JSON.parse(clean);
-  } catch (e) {
-    throw new Error('AIの応答をJSONとして解析できませんでした');
-  }
-  if (!parsed || !Array.isArray(parsed.boats) || parsed.boats.length === 0) {
-    throw new Error('画像から艇データを読み取れませんでした');
-  }
-  return parsed;
+  return result.data;
 }
 
-function normalizeAIBoats(boats) {
+function normalizeAIBoats(
+  boats,
+  raceOdds = {},
+  positionReturns = {}
+) {
   const lanes = [1, 2, 3, 4, 5, 6];
-  return lanes.map(lane => {
-    const b = boats.find(x => x.lane === lane) || {};
-    const konsetsu = Array.isArray(b.konsetsu) ? b.konsetsu : [];
-    const stValues = konsetsu.filter(e => e.st != null).map(e => e.st);
-    const konsetsuAvgST = stValues.length ? stValues.reduce((a, c) => a + c, 0) / stValues.length : null;
+
+  return lanes.map((lane) => {
+    const b = boats.find((x) => x.lane === lane) || {};
+
+    const konsetsu = Array.isArray(b.currentSeriesResults)
+      ? b.currentSeriesResults
+      : Array.isArray(b.konsetsu)
+        ? b.konsetsu
+        : [];
+
+    const stValues = konsetsu
+      .map((e) => Number(e.st))
+      .filter((v) => !Number.isNaN(v));
+
+    const konsetsuAvgST = stValues.length
+      ? stValues.reduce((a, c) => a + c, 0) / stValues.length
+      : null;
+
     return {
       lane,
-      regnum: b.regnum ?? '', classG: b.classG ?? '',
-      branchOrigin: b.branchOrigin ?? '',
-      age: b.age ?? null, regWeight: b.regWeight ?? null,
-      avgST: b.avgST ?? null,
-      natWin: b.natWin ?? 0, nat2: b.nat2 ?? 0, nat3: b.nat3 ?? 0,
-      locWin: b.locWin ?? 0, loc2: b.loc2 ?? 0, loc3: b.loc3 ?? 0,
-      motorNo: b.motorNo ?? '', motor2: b.motor2 ?? 0, motor3: b.motor3 ?? 0,
-      boatNo: b.boatNo ?? '', boat2: b.boat2 ?? 0, boat3: b.boat3 ?? 0,
-      exTime: b.exTime ?? null, tilt: b.tilt ?? null, exWeight: b.exWeight ?? null,
-      partsExchanged: !!b.partsExchanged,
+
+      regnum: b.registrationNumber ?? b.regnum ?? "",
+      classG: b.class ?? b.classG ?? "",
+      branchOrigin: b.branchOrigin ?? "",
+      age: b.age ?? null,
+      regWeight: b.weight ?? b.regWeight ?? null,
+
+      avgST: b.averageST ?? b.avgST ?? null,
+
+      natWin: b.nationalWinRate ?? b.natWin ?? 0,
+      nat2: b.national2Rate ?? b.nat2 ?? 0,
+
+      locWin: b.localWinRate ?? b.locWin ?? 0,
+      loc2: b.local2Rate ?? b.loc2 ?? 0,
+
+      motorNo: b.motorNumber ?? b.motorNo ?? "",
+      motor2: b.motorRate ?? b.motor2 ?? 0,
+
+      boatNo: b.boatNumber ?? b.boatNo ?? "",
+      boat2: b.boatRate ?? b.boat2 ?? 0,
+
+      exTime: b.exhibitionTime ?? b.exTime ?? null,
+      tilt: b.tilt ?? null,
+
+      partsExchanged:
+        !!b.partsExchanged ||
+        (Array.isArray(b.partsReplacement) &&
+          b.partsReplacement.length > 0),
+
       entryCourse: b.entryCourse ?? lane,
-      exST: b.exST ?? null, exhibitF: !!b.exhibitF,
-      konsetsu, konsetsuAvgST,
-      hasData: !!(b.regnum || b.motorNo),
+
+      exST: b.exhibitionST ?? b.exST ?? null,
+
+      exhibitF: !!b.exhibitionF || !!b.exhibitF,
+
+      konsetsu,
+      konsetsuAvgST,
+
+      odds:
+  raceOdds &&
+  typeof raceOdds === 'object' &&
+  !Array.isArray(raceOdds)
+    ? raceOdds
+    : b.odds &&
+        typeof b.odds === 'object' &&
+        !Array.isArray(b.odds)
+      ? b.odds
+      : {},
+
+      positionReturns:
+  positionReturns &&
+  typeof positionReturns === 'object' &&
+  !Array.isArray(positionReturns)
+    ? positionReturns
+    : {},
+
+      hasData: !!(
+        b.registrationNumber ||
+        b.regnum ||
+        b.motorNumber ||
+        b.motorNo
+      ),
     };
   });
+}
+
+    
+
+function scoreStars(score) {
+  const n = Math.max(1, Math.min(5, Math.round((score || 0) / 20)));
+  return '★'.repeat(n) + '☆'.repeat(5 - n);
+}
+
+function scoreColor(score) {
+  if (score >= 90) return '#52d273';
+  if (score >= 80) return '#5fa8ff';
+  if (score >= 70) return '#e8b800';
+  if (score >= 60) return '#ff9b6b';
+  return '#ff6b6b';
+}
+
+function getRaceSummary(boats) {
+  if (!boats || boats.length === 0) return null;
+  const top = boats[0];
+  const c1 = boats.find(b => b.entryCourse === 1);
+  const confidence = top.raceConfidence ?? top.confidence ?? 50;
+  const chaosIndex = top.chaosIndex ?? 50;
+  const escapeRate = c1
+    ? Math.max(5, Math.min(95, Math.round(
+        35 +
+        (c1.courseScore || 0) * 0.45 +
+        (c1.stScore || 50) * 0.18 +
+        (c1.gearScore || 50) * 0.12 -
+        (c1.dangerScore || 0) * 0.28
+      )))
+    : null;
+
+  return {
+    confidence,
+    confidenceLabel: top.raceConfidenceLabel || (confidence >= 70 ? '高い' : confidence >= 55 ? '標準' : '低め'),
+    chaosIndex,
+    chaosStars: top.chaosStars || Math.max(1, Math.ceil(chaosIndex / 20)),
+    escapeRate,
+    bestBoat: top,
+    dangerBoat: [...boats].sort((a, b) => (b.dangerScore || 0) - (a.dangerScore || 0))[0],
+    targetBoat: [...boats].sort((a, b) => (b.targetScore || 0) - (a.targetScore || 0))[0],
+  };
 }
 
 // ---------- UI ----------
@@ -844,7 +1075,7 @@ export default function BoatRaceTool() {
   const [betType, setBetType] = useState('3連単');
   const [budgetYen, setBudgetYen] = useState(500);
   const [bets, setBets] = useState(null);
-  const [anaBudget, setAnaBudget] = useState(150);
+  const [anaBudget, setAnaBudget] = useState(200);
   const [anaResult, setAnaResult] = useState(null);
   const [forecast, setForecast] = useState(null);
   const [images, setImages] = useState([]);
@@ -875,7 +1106,7 @@ export default function BoatRaceTool() {
       return;
     }
     const merged = mergeBoats(rl, bi, sd);
-    const scored = computeScores(merged, sd ? sd.weather : null);
+    const scored = computeScores(merged, venue, sd ? sd.weather : null);
     setBoats(scored);
     setWeather(sd ? sd.weather : null);
     setBets(null);
@@ -889,9 +1120,21 @@ export default function BoatRaceTool() {
   };
 
   const handleGenerateBets = () => {
-    if (!boats) return;
-    setBets(generateBets(boats, betType, budgetYen));
-  };
+  if (!boats) return;
+
+  const generatedBets = generateBets(
+    boats,
+    betType,
+    budgetYen
+  );
+
+  setBets(
+    addExpectedValueToBets(
+      generatedBets,
+      boats
+    )
+  );
+};
 
   const handleImagesSelected = async (fileList) => {
     setImageError('');
@@ -918,13 +1161,33 @@ export default function BoatRaceTool() {
     setImageError('');
     try {
       const result = await callVisionAPI(images);
-      const normalized = normalizeAIBoats(result.boats);
-      const scored = computeScores(normalized, result.weather || null);
+      const normalized = normalizeAIBoats(
+  result.boats,
+  result.odds,
+  result.positionReturns
+);
+      const scored = computeScores(normalized, venue, result.weather || null);
       setBoats(scored);
-      setWeather(result.weather || null);
-      setBets(null);
-      setAnaResult(null);
-      setForecast(generateForecast(scored));
+setWeather(result.weather || null);
+
+const autoBets = addExpectedValueToBets(
+  generateBets(
+    scored,
+    betType,
+    budgetYen
+  ),
+  scored
+);
+
+const autoAnaResult = generateAnaBets(
+  scored,
+  betType,
+  anaBudget
+);
+
+setBets(autoBets);
+setAnaResult(autoAnaResult);
+setForecast(generateForecast(scored));
       const missingCount = normalized.filter(b => !b.hasData).length;
       setStatus(missingCount ? `画像解析完了(${6 - missingCount}/6艇分を検出、${missingCount}艇はデータ不足)` : '画像解析完了(6艇分を検出)');
     } catch (e) {
@@ -1000,6 +1263,8 @@ export default function BoatRaceTool() {
     setStatsResult({ mark: computeMarkStats(all), trifecta: computeTrifectaStats(all), byVenue: computeVenueStats(all) });
     setStatsLoading(false);
   };
+
+  const raceSummary = getRaceSummary(boats);
 
   return (
     <div style={{ minHeight: '100vh', background: '#0b1420', color: '#e8edf2', fontFamily: 'system-ui, -apple-system, "Hiragino Sans", sans-serif' }}>
@@ -1132,6 +1397,128 @@ export default function BoatRaceTool() {
           </div>
         )}
 
+
+        {/* AI result summary */}
+        {boats && raceSummary && (
+          <div style={{ marginBottom: 18 }}>
+            <div style={{
+              background: 'linear-gradient(180deg, #162438 0%, #111d2b 100%)',
+              border: '1px solid #35516f',
+              borderRadius: 12,
+              padding: 14,
+              marginBottom: 12,
+              boxShadow: '0 8px 22px rgba(0,0,0,0.18)',
+            }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+                <div>
+                  <div style={{ fontSize: 11, color: '#8ba3bd', marginBottom: 2 }}>🤖 AI解析結果</div>
+                  <div style={{ fontSize: 17, fontWeight: 800 }}>
+                    信頼度 {Math.round(raceSummary.confidence)}%
+                    <span style={{ fontSize: 12, color: '#8ba3bd', marginLeft: 6 }}>({raceSummary.confidenceLabel})</span>
+                  </div>
+                </div>
+                <div style={{ textAlign: 'right' }}>
+                  <div style={{ fontSize: 11, color: '#8ba3bd' }}>荒れ指数</div>
+                  <div style={{ fontSize: 15, fontWeight: 800, color: '#ff9b6b' }}>
+                    {'★'.repeat(raceSummary.chaosStars)}{'☆'.repeat(5 - raceSummary.chaosStars)}
+                  </div>
+                </div>
+              </div>
+
+              <div style={{ height: 8, background: '#0b1420', borderRadius: 999, overflow: 'hidden', marginBottom: 12 }}>
+                <div style={{
+                  width: `${Math.max(0, Math.min(100, raceSummary.confidence))}%`,
+                  height: '100%',
+                  background: '#e8b800',
+                  borderRadius: 999,
+                }} />
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
+                <div style={{ background: '#0f1a28', borderRadius: 8, padding: 10 }}>
+                  <div style={{ fontSize: 10, color: '#8ba3bd' }}>本命</div>
+                  <div style={{ fontSize: 18, fontWeight: 800, color: '#e8b800' }}>
+                    {raceSummary.bestBoat.lane}号艇
+                  </div>
+                  <div style={{ fontSize: 10, color: '#c5d3e0' }}>{raceSummary.bestBoat.mark} 総合{Math.round(raceSummary.bestBoat.total)}点</div>
+                </div>
+                <div style={{ background: '#0f1a28', borderRadius: 8, padding: 10 }}>
+                  <div style={{ fontSize: 10, color: '#8ba3bd' }}>1コース逃げ</div>
+                  <div style={{ fontSize: 18, fontWeight: 800, color: '#7aa6e8' }}>
+                    {raceSummary.escapeRate != null ? `${raceSummary.escapeRate}%` : '-'}
+                  </div>
+                  <div style={{ fontSize: 10, color: '#c5d3e0' }}>展開目安</div>
+                </div>
+                <div style={{ background: '#0f1a28', borderRadius: 8, padding: 10 }}>
+                  <div style={{ fontSize: 10, color: '#8ba3bd' }}>買い判断</div>
+                  <div style={{
+                    fontSize: 14,
+                    fontWeight: 800,
+                    color: raceSummary.confidence >= 70 ? '#52d273' : raceSummary.confidence >= 55 ? '#e8b800' : '#ff6b6b'
+                  }}>
+                    {raceSummary.confidence >= 70 ? '買い候補' : raceSummary.confidence >= 55 ? '絞って購入' : '見送り候補'}
+                  </div>
+                  <div style={{ fontSize: 10, color: '#c5d3e0' }}>無理買い防止</div>
+                </div>
+              </div>
+
+              {(raceSummary.targetBoat?.targetScore > 0 || raceSummary.dangerBoat?.dangerScore > 0) && (
+                <div style={{ marginTop: 10, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                  <div style={{ background: '#10251d', border: '1px solid #1f8a4c', borderRadius: 8, padding: 9 }}>
+                    <div style={{ fontSize: 11, color: '#7aff9b', fontWeight: 800 }}>★ 狙い艇</div>
+                    <div style={{ fontSize: 15, fontWeight: 800 }}>{raceSummary.targetBoat.lane}号艇</div>
+                    <div style={{ fontSize: 10, color: '#b9d9c8', lineHeight: 1.4 }}>
+                      {(raceSummary.targetBoat.targetReasons || []).slice(0, 2).join('・') || '総合バランス良好'}
+                    </div>
+                  </div>
+                  <div style={{ background: '#2a171a', border: '1px solid #8d3f47', borderRadius: 8, padding: 9 }}>
+                    <div style={{ fontSize: 11, color: '#ff8b95', fontWeight: 800 }}>⚠ 危険艇</div>
+                    <div style={{ fontSize: 15, fontWeight: 800 }}>{raceSummary.dangerBoat.lane}号艇</div>
+                    <div style={{ fontSize: 10, color: '#e4b8bc', lineHeight: 1.4 }}>
+                      {(raceSummary.dangerBoat.dangerReasons || []).slice(0, 2).join('・') || '目立つ危険材料なし'}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div style={{ fontSize: 12, fontWeight: 800, marginBottom: 7 }}>AI総合スコア</div>
+            {boats.map(b => (
+              <div key={`score-${b.lane}`} style={{
+                display: 'grid',
+                gridTemplateColumns: '34px 30px 1fr auto',
+                alignItems: 'center',
+                gap: 8,
+                background: '#131f2e',
+                border: '1px solid #2a3d52',
+                borderRadius: 8,
+                padding: '9px 10px',
+                marginBottom: 6,
+              }}>
+                <div style={{
+                  width: 28, height: 28, borderRadius: 6,
+                  background: LANE_COLORS[b.lane].bg,
+                  color: LANE_COLORS[b.lane].text,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  fontWeight: 800,
+                }}>{b.lane}</div>
+                <div style={{ fontWeight: 800, color: '#e8b800' }}>{b.mark}</div>
+                <div>
+                  <div style={{ fontSize: 12, color: scoreColor(b.total), fontWeight: 800 }}>
+                    {scoreStars(b.total)}
+                  </div>
+                  <div style={{ fontSize: 10, color: '#8ba3bd' }}>
+                    実力{Math.round(b.playerScore)} / 機力{Math.round(b.gearScore)} / 展示{Math.round(b.exScore)} / ST{Math.round(b.stScore)}
+                  </div>
+                </div>
+                <div style={{ fontSize: 18, fontWeight: 900, color: scoreColor(b.total) }}>
+                  {Math.round(b.total)}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
         {/* Results table */}
         {boats && (
           <div style={{ marginBottom: 20 }}>
@@ -1185,24 +1572,120 @@ export default function BoatRaceTool() {
 
               {bets && (
                 <div>
+
                   {bets.map((b, i) => (
-                    <div key={i} style={{
-                      display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                      background: '#131f2e', border: b.insurance ? '1px dashed #8ba3bd' : '1px solid #2a3d52', borderRadius: 6, padding: '8px 12px', marginBottom: 5,
-                    }}>
-                      <div style={{ fontWeight: 700, fontSize: 15 }}>
-                        {b.combo} {b.insurance && <span style={{ fontSize: 10, color: '#8ba3bd', fontWeight: 400 }}>(保険)</span>}
-                      </div>
-                      <div style={{ fontSize: 11, color: '#8ba3bd' }}>{b.insurance ? '1号艇飛び目' : `目安確率 ${b.prob}%`}</div>
-                      <div style={{ fontWeight: 700, fontSize: 14, color: '#e8b800' }}>{b.yen}円</div>
-                    </div>
-                  ))}
-                  <div style={{ fontSize: 11, color: '#8ba3bd', marginTop: 6, textAlign: 'right' }}>
-                    合計 {bets.reduce((a, c) => a + c.yen, 0)}円
-                  </div>
+  <div
+    key={i}
+    style={{
+      display: 'flex',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      background: '#131f2e',
+      borderRadius: 6,
+      padding: '10px 12px',
+      marginBottom: 6,
+    }}
+  >
+    <div style={{ fontWeight: 700 }}>
+      {b.combo} {b.insurance ? '（保険）' : ''}
+    </div>
+
+    <div
+      style={{
+        flex: 1,
+        marginLeft: 10,
+        fontSize: 11,
+        color: '#8ba3bd',
+      }}
+    >
+      {b.insurance ? (
+        <div>1号艇飛び目</div>
+      ) : (
+        <>
+          <div>目安確率 {b.prob}%</div>
+
+          {b.odds !== null &&
+          b.odds !== undefined ? (
+            <>
+              <div>
+                オッズ {b.odds}倍 ／ 期待値 {b.expectedValue}%
+              </div>
+
+              <div
+                style={{
+                  marginTop: 2,
+                  fontWeight: 700,
+                  color:
+                    b.expectedValue >= 110
+                      ? '#7aff9b'
+                      : b.expectedValue >= 100
+                        ? '#ffd54a'
+                        : '#ff8080',
+                }}
+              >
+                {b.evLabel}
+
+                {b.expectedProfit !== null &&
+                  ` ／ 期待収支 ${
+                    b.expectedProfit >= 0 ? '+' : ''
+                  }${b.expectedProfit}円`}
+              </div>
+            </>
+          ) : (
+            <div>個別オッズ未取得</div>
+          )}
+
+          {b.returnExpectationLevel !== 'none' && (
+            <div
+              style={{
+                marginTop: 4,
+                fontWeight: 800,
+                color:
+                  b.returnExpectationLevel === 'high'
+                    ? '#7aff9b'
+                    : b.returnExpectationLevel === 'standard'
+                      ? '#ffd54a'
+                      : '#ff8080',
+              }}
+            >
+              {b.returnExpectationLevel === 'high' && '🟢 '}
+              {b.returnExpectationLevel === 'standard' && '🟡 '}
+              {b.returnExpectationLevel === 'low' && '🔴 '}
+
+              回収率期待：{b.returnExpectationLabel}
+
+              {b.returnExpectationScore !== null &&
+                `（参考${b.returnExpectationScore}）`}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+
+    <div
+      style={{
+        fontWeight: 700,
+        fontSize: 14,
+        color: '#e8b800',
+      }}
+    >
+      {b.yen}円
+    </div>
+  </div>
+))}
+
+                  <div
+  style={{
+    fontSize: 11,
+    color: '#8ba3bd',
+    marginTop: 6,
+    textAlign: 'right',
+  }}
+>
+  合計 {bets.reduce((a, c) => a + c.yen, 0)}円
+</div>
                 </div>
               )}
-            </div>
 
             {/* Ana (longshot) bets */}
             <div style={{ marginTop: 20, borderTop: '1px solid #1c2b3d', paddingTop: 14 }}>
@@ -1249,6 +1732,7 @@ export default function BoatRaceTool() {
               )}
             </div>
           </div>
+        </div>
         )}
 
         {/* Venue memo */}
@@ -1385,3 +1869,4 @@ export default function BoatRaceTool() {
     </div>
   );
 }
+
