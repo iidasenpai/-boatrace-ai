@@ -853,10 +853,23 @@ export default function BoatRaceTool() {
       const normalized = normalizeAIBoats(result.boats);
       const scored = computeScores(normalized, venue, result.weather || null);
       setBoats(scored);
-      setWeather(result.weather || null);
-      setBets(null);
-      setAnaResult(null);
-      setForecast(generateForecast(scored));
+setWeather(result.weather || null);
+
+const autoBets = generateBets(
+  scored,
+  betType,
+  budgetYen
+);
+
+const autoAnaResult = generateAnaBets(
+  scored,
+  betType,
+  anaBudget
+);
+
+setBets(autoBets);
+setAnaResult(autoAnaResult);
+setForecast(generateForecast(scored));
       const missingCount = normalized.filter(b => !b.hasData).length;
       setStatus(missingCount ? `画像解析完了(${6 - missingCount}/6艇分を検出、${missingCount}艇はデータ不足)` : '画像解析完了(6艇分を検出)');
     } catch (e) {
