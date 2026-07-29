@@ -1683,8 +1683,7 @@ setForecast(generateForecast(scored));
 >
   合計 {bets.reduce((a, c) => a + c.yen, 0)}円
 </div>
-                  
-)}
+
 
             {/* Ana (longshot) bets */}
             <div style={{ marginTop: 20, borderTop: '1px solid #1c2b3d', paddingTop: 14 }}>
