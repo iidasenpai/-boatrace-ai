@@ -646,30 +646,40 @@ async function callVisionAPI(images) {
 
 function normalizeAIBoats(boats) {
   const lanes = [1, 2, 3, 4, 5, 6];
+  const sourceBoats = Array.isArray(boats) ? boats : [];
+
+  const toNumber = value => {
+    if (value === null || value === undefined || value === '') return null;
+
+    const normalized = String(value)
+      .replace(/[％%]/g, '')
+      .replace(/[^\d.-]/g, '');
+
+    if (!normalized) return null;
+
+    const number = Number(normalized);
+    return Number.isFinite(number) ? number : null;
+  };
+
   return lanes.map(lane => {
-    const b = boats.find(x => x.lane === lane) || {};
-    const konsetsu = Array.isArray(b.konsetsu) ? b.konsetsu : [];
-    const stValues = konsetsu.filter(e => e.st != null).map(e => e.st);
-    const konsetsuAvgST = stValues.length ? stValues.reduce((a, c) => a + c, 0) / stValues.length : null;
-    return {
-      lane,
-      regnum: b.regnum ?? '', classG: b.classG ?? '',
-      branchOrigin: b.branchOrigin ?? '',
-      age: b.age ?? null, regWeight: b.regWeight ?? null,
-      avgST: b.avgST ?? null,
-      natWin: b.natWin ?? 0, nat2: b.nat2 ?? 0, nat3: b.nat3 ?? 0,
-      locWin: b.locWin ?? 0, loc2: b.loc2 ?? 0, loc3: b.loc3 ?? 0,
-      motorNo: b.motorNo ?? '', motor2: b.motor2 ?? 0, motor3: b.motor3 ?? 0,
-      boatNo: b.boatNo ?? '', boat2: b.boat2 ?? 0, boat3: b.boat3 ?? 0,
-      exTime: b.exTime ?? null, tilt: b.tilt ?? null, exWeight: b.exWeight ?? null,
-      partsExchanged: !!b.partsExchanged,
-      entryCourse: b.entryCourse ?? lane,
-      exST: b.exST ?? null, exhibitF: !!b.exhibitF,
-      konsetsu, konsetsuAvgST,
-      hasData: !!(b.regnum || b.motorNo),
-    };
-  });
-}
+    const raw =
+      sourceBoats.find(item => Number(item?.lane) === lane) || {};
+
+    const seriesResults = Array.isArray(raw.currentSeriesResults)
+      ? raw.currentSeriesResults
+      : Array.isArray(raw.konsetsu)
+        ? raw.konsetsu
+        : [];
+
+    const konsetsu = seriesResults.map(item => {
+      if (typeof item === 'object' && item !== null) {
+        return {
+          ...item,
+          st: toNumber(
+            item.st ??
+            item.ST ??
+            item.startTiming ??
+            item
 
 
 function scoreStars(score) {
