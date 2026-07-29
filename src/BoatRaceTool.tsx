@@ -759,7 +759,7 @@ export default function BoatRaceTool() {
       return;
     }
     const merged = mergeBoats(rl, bi, sd);
-    const scored = computeScores(merged, sd ? sd.weather : null);
+    const scored = computeScores(merged, venue, sd ? sd.weather : null);
     setBoats(scored);
     setWeather(sd ? sd.weather : null);
     setBets(null);
@@ -803,7 +803,7 @@ export default function BoatRaceTool() {
     try {
       const result = await callVisionAPI(images);
       const normalized = normalizeAIBoats(result.boats);
-      const scored = computeScores(normalized, result.weather || null);
+      const scored = computeScores(normalized, venue, result.weather || null);
       setBoats(scored);
       setWeather(result.weather || null);
       setBets(null);
