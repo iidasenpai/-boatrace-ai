@@ -646,30 +646,73 @@ async function callVisionAPI(images) {
 
 function normalizeAIBoats(boats) {
   const lanes = [1, 2, 3, 4, 5, 6];
-  const sourceBoats = Array.isArray(boats) ? boats : [];
 
-  const toNumber = value => {
-    if (value === null || value === undefined || value === '') return null;
+  return lanes.map((lane) => {
+    const b = boats.find((x) => x.lane === lane) || {};
 
-    const normalized = String(value)
-      .replace(/[％%]/g, '')
-      .replace(/[^\d.-]/g, '');
-
-    if (!normalized) return null;
-
-    const number = Number(normalized);
-    return Number.isFinite(number) ? number : null;
-  };
-
-  return lanes.map(lane => {
-    const raw =
-      sourceBoats.find(item => Number(item?.lane) === lane) || {};
-
-    const seriesResults = Array.isArray(raw.currentSeriesResults)
-      ? raw.currentSeriesResults
-      : Array.isArray(raw.konsetsu)
-        ? raw.konsetsu
+    const konsetsu = Array.isArray(b.currentSeriesResults)
+      ? b.currentSeriesResults
+      : Array.isArray(b.konsetsu)
+        ? b.konsetsu
         : [];
+
+    const stValues = konsetsu
+      .map((e) => Number(e.st))
+      .filter((v) => !Number.isNaN(v));
+
+    const konsetsuAvgST = stValues.length
+      ? stValues.reduce((a, c) => a + c, 0) / stValues.length
+      : null;
+
+    return {
+      lane,
+
+      regnum: b.registrationNumber ?? b.regnum ?? "",
+      classG: b.class ?? b.classG ?? "",
+      branchOrigin: b.branchOrigin ?? "",
+      age: b.age ?? null,
+      regWeight: b.weight ?? b.regWeight ?? null,
+
+      avgST: b.averageST ?? b.avgST ?? null,
+
+      natWin: b.nationalWinRate ?? b.natWin ?? 0,
+      nat2: b.national2Rate ?? b.nat2 ?? 0,
+
+      locWin: b.localWinRate ?? b.locWin ?? 0,
+      loc2: b.local2Rate ?? b.loc2 ?? 0,
+
+      motorNo: b.motorNumber ?? b.motorNo ?? "",
+      motor2: b.motorRate ?? b.motor2 ?? 0,
+
+      boatNo: b.boatNumber ?? b.boatNo ?? "",
+      boat2: b.boatRate ?? b.boat2 ?? 0,
+
+      exTime: b.exhibitionTime ?? b.exTime ?? null,
+      tilt: b.tilt ?? null,
+
+      partsExchanged:
+        !!b.partsExchanged ||
+        (Array.isArray(b.partsReplacement) &&
+          b.partsReplacement.length > 0),
+
+      entryCourse: b.entryCourse ?? lane,
+
+      exST: b.exhibitionST ?? b.exST ?? null,
+
+      exhibitF: !!b.exhibitionF || !!b.exhibitF,
+
+      konsetsu,
+      konsetsuAvgST,
+
+      hasData: !!(
+        b.registrationNumber ||
+        b.regnum ||
+        b.motorNumber ||
+        b.motorNo
+      ),
+    };
+  });
+}
 
     const konsetsu = seriesResults.map(item => {
       if (typeof item === 'object' && item !== null) {
