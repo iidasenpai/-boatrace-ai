@@ -900,9 +900,21 @@ export default function BoatRaceTool() {
   };
 
   const handleGenerateBets = () => {
-    if (!boats) return;
-    setBets(generateBets(boats, betType, budgetYen));
-  };
+  if (!boats) return;
+
+  const generatedBets = generateBets(
+    boats,
+    betType,
+    budgetYen
+  );
+
+  setBets(
+    addExpectedValueToBets(
+      generatedBets,
+      boats
+    )
+  );
+};
 
   const handleImagesSelected = async (fileList) => {
     setImageError('');
