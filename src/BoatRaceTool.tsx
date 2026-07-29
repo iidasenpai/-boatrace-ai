@@ -778,6 +778,11 @@ function normalizeAIBoats(boats) {
       konsetsu,
       konsetsuAvgST,
 
+      odds:
+  b.odds && typeof b.odds === 'object'
+    ? b.odds
+    : {},
+
       hasData: !!(
         b.registrationNumber ||
         b.regnum ||
