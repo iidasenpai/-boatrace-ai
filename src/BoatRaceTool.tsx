@@ -1356,7 +1356,53 @@ setForecast(generateForecast(scored));
                       <div style={{ fontWeight: 700, fontSize: 15 }}>
                         {b.combo} {b.insurance && <span style={{ fontSize: 10, color: '#8ba3bd', fontWeight: 400 }}>(保険)</span>}
                       </div>
-                      <div style={{ fontSize: 11, color: '#8ba3bd' }}>{b.insurance ? '1号艇飛び目' : `目安確率 ${b.prob}%`}</div>
+                      <div
+  style={{
+    flex: 1,
+    marginLeft: 10,
+    fontSize: 11,
+    color: '#8ba3bd',
+  }}
+>
+  {b.insurance ? (
+    '1号艇飛び目'
+  ) : (
+    <>
+      <div>目安確率 {b.prob}%</div>
+
+      {b.odds !== null &&
+      b.odds !== undefined ? (
+        <>
+          <div>
+            オッズ {b.odds}倍 ／
+            期待値 {b.expectedValue}%
+          </div>
+
+          <div
+            style={{
+              marginTop: 2,
+              fontWeight: 700,
+              color:
+                b.expectedValue >= 110
+                  ? '#7aff9b'
+                  : b.expectedValue >= 100
+                    ? '#e8b800'
+                    : '#ff8080',
+            }}
+          >
+            {b.evLabel}
+            {b.expectedProfit !== null &&
+              ` ／ 期待収支 ${
+                b.expectedProfit >= 0 ? '+' : ''
+              }${b.expectedProfit}円`}
+          </div>
+        </>
+      ) : (
+        <div>オッズ未取得・期待値計算なし</div>
+      )}
+    </>
+  )}
+</div>
                       <div style={{ fontWeight: 700, fontSize: 14, color: '#e8b800' }}>{b.yen}円</div>
                     </div>
                   ))}
