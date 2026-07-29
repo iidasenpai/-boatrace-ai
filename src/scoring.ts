@@ -589,7 +589,14 @@ export function computeScores(
   const ranked = baseRows
     .map((boat, index) => ({
       ...boat,
-      total: round1(boat.rawTotal),
+      // rawTotalを保持しつつ微小な決定的タイブレークを加える。
+      // 同点時はコース適性→展示→艇番の順で順位を確定する。
+      total: round1(
+        boat.rawTotal +
+        boat.courseScore * 0.0008 +
+        boat.exScore * 0.0004 +
+        (7 - Number(boat.lane || 7)) * 0.0001
+      ),
       winShare: round1(shares[index] * 100),
       confidence: clamp(
         round1(
@@ -605,7 +612,12 @@ export function computeScores(
       chaosIndex,
       chaosStars,
     }))
-    .sort((a, b) => b.total - a.total);
+    .sort((a, b) =>
+      b.total - a.total ||
+      b.courseScore - a.courseScore ||
+      b.exScore - a.exScore ||
+      a.lane - b.lane
+    );
 
   const marks = ['◎', '○', '▲', '△', '△', '△'];
 

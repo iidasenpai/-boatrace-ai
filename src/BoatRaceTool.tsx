@@ -572,7 +572,11 @@ function rankAndAllocateBets(bets, boats, budgetYen) {
     const hitScore = clampScore((Number(bet.prob) || 0) * 5.2);
     const valueScore = getValueScore(bet);
     const flowScore = getFlowSuitability(bet.combo, boats);
-    const rawIndex = clampScore(hitScore * 0.62 + valueScore * 0.20 + flowScore * 0.18);
+    const firstLane = Number(String(bet.combo).split('-')[0]);
+    const firstBoat = boats.find(b => b.lane === firstLane);
+    // 1着艇に明確な危険材料がある買い目は最優先になりにくくする。
+    const firstDangerPenalty = Math.min(18, Number(firstBoat?.dangerScore || 0) * 0.55);
+    const rawIndex = clampScore(hitScore * 0.62 + valueScore * 0.20 + flowScore * 0.18 - firstDangerPenalty);
     // 表示用AI指数は70〜100中心に再スケールし、レース信頼度との見た目の乖離を抑える
     const aiIndex = Math.round((62 + rawIndex * 0.33) * 10) / 10;
     const rankLabel = aiIndex >= 92 ? '超本命' : aiIndex >= 85 ? '本命' : aiIndex >= 79 ? '強め' : aiIndex >= 72 ? 'バランス' : '高配当寄り';
@@ -1155,12 +1159,24 @@ function normalizeAIBoats(
 
 function getDisplayScore(boat, allBoats) {
   if (!boat || !Array.isArray(allBoats) || allBoats.length === 0) return 50;
-  const values = allBoats.map(b => Number(b.total)).filter(Number.isFinite);
+  const sorted = [...allBoats].sort((a, b) =>
+    Number(b.total || 0) - Number(a.total || 0) ||
+    Number(b.courseScore || 0) - Number(a.courseScore || 0) ||
+    Number(b.exScore || 0) - Number(a.exScore || 0) ||
+    Number(a.lane || 0) - Number(b.lane || 0)
+  );
+  const values = sorted.map(b => Number(b.total)).filter(Number.isFinite);
   const min = Math.min(...values);
   const max = Math.max(...values);
-  if (!Number.isFinite(min) || !Number.isFinite(max) || max === min) return 70;
+  if (!Number.isFinite(min) || !Number.isFinite(max) || max === min) {
+    const idx = Math.max(0, sorted.findIndex(b => b.lane === boat.lane));
+    return Math.round((90 - idx * 7.5) * 10) / 10;
+  }
   const relative = (Number(boat.total) - min) / (max - min);
-  return Math.round(52 + relative * 38);
+  const rankIndex = Math.max(0, sorted.findIndex(b => b.lane === boat.lane));
+  // 小数点を残して同点表示を防ぎ、順位との整合性も維持する。
+  const score = 52 + relative * 38 - rankIndex * 0.18;
+  return Math.round(Math.max(50, Math.min(90, score)) * 10) / 10;
 }
 
 function getComponentDisplayScore(value, hasSource = true) {
@@ -1264,8 +1280,16 @@ function getRaceSummary(boats) {
     topExScore: Number(top.exScore || 0),
     topStScore: Number(top.stScore || 0),
     bestBoat: top,
-    dangerBoat: [...boats].sort((a, b) => (b.dangerScore || 0) - (a.dangerScore || 0))[0],
-    targetBoat: [...boats].sort((a, b) => (b.targetScore || 0) - (a.targetScore || 0))[0],
+    // 本命と危険艇が同じになる矛盾を避ける。危険材料が弱い場合は表示しない。
+    dangerBoat: [...boats]
+      .filter(b => b.lane !== top.lane && Number(b.dangerScore || 0) >= 8)
+      .sort((a, b) =>
+        Number(b.dangerScore || 0) - Number(a.dangerScore || 0) ||
+        Number(b.rank || 99) - Number(a.rank || 99)
+      )[0] || null,
+    targetBoat: [...boats]
+      .filter(b => b.lane !== top.lane)
+      .sort((a, b) => (b.targetScore || 0) - (a.targetScore || 0))[0] || null,
   };
 }
 
@@ -1927,6 +1951,11 @@ setForecast(generateForecast(scored));
                     </div>
                   )}
 
+                  {bets.length > 1 && (
+                    <div style={{ fontSize: 11, fontWeight: 800, color: '#8ba3bd', margin: '12px 2px 7px' }}>
+                      次点候補（AI順位2位以下）
+                    </div>
+                  )}
                   {bets.slice(1).map((b, i) => {
                     const rankColor =
                       b.rankLevel === 'main'
