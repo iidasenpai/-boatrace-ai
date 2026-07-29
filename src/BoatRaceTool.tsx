@@ -154,10 +154,6 @@ function mergeBoats(racelist, beforeInfo, startDisp) {
   });
 }
 
-// ---------- Scoring ----------
-
-
-
 // ---------- Bet recommendation (Plackett-Luce) ----------
 
 function permutations3(indices) {
@@ -350,11 +346,32 @@ function generateForecast(boats) {
   return lines;
 }
 
+
+// 通常ブラウザ用ストレージ互換レイヤー
+const browserStorage = {
+  async get(key) {
+    const value = window.localStorage.getItem(key);
+    return value == null ? null : { value };
+  },
+  async set(key, value) {
+    window.localStorage.setItem(key, value);
+    return { ok: true };
+  },
+  async list(prefix = '') {
+    const keys = [];
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const key = window.localStorage.key(i);
+      if (key && key.startsWith(prefix)) keys.push(key);
+    }
+    return { keys };
+  },
+};
+
 // ---------- Storage helpers ----------
 
 async function loadJSON(key, fallback) {
   try {
-    const res = await window.storage.get(key, false);
+    const res = await browserStorage.get(key, false);
     return res ? JSON.parse(res.value) : fallback;
   } catch (e) {
     return fallback;
@@ -362,7 +379,7 @@ async function loadJSON(key, fallback) {
 }
 async function saveJSON(key, value) {
   const attempt = async () => {
-    const result = await window.storage.set(key, JSON.stringify(value), false);
+    const result = await browserStorage.set(key, JSON.stringify(value), false);
     if (!result) throw new Error('storage.set returned empty result');
     return result;
   };
@@ -385,12 +402,12 @@ async function saveJSON(key, value) {
 
 async function loadAllRaces() {
   try {
-    const listRes = await window.storage.list('boatrace:races:', false);
+    const listRes = await browserStorage.list('boatrace:races:', false);
     if (!listRes || !Array.isArray(listRes.keys)) return [];
     const all = [];
     for (const key of listRes.keys) {
       try {
-        const res = await window.storage.get(key, false);
+        const res = await browserStorage.get(key, false);
         if (res && res.value) {
           const races = JSON.parse(res.value);
           if (Array.isArray(races)) {
@@ -597,89 +614,8 @@ const VISION_PROMPT = `あなたは競艇(ボートレース)の出走表・直�
 
 boatsは必ずlane 1〜6の6艇分を含めてください。今節成績の着順は色付きの丸数字や下線付き数字として表示されていることが多いので、見えている範囲はできるだけ拾ってください。`;
 
-async function callVisionAPI(images) {
-  const content = [
-    ...images.map(img => ({ type: 'image', source: { type: 'base64', media_type: img.mediaType, data: img.base64 } })),
-    { type: 'text', text: VISION_PROMPT },
-  ];
-  const body = JSON.stringify({
-    model: 'claude-sonnet-4-6',
-    max_tokens: 4000,
-    messages: [{ role: 'user', content }],
-  });
-
-  const attemptFetch = async () => {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 60000);
-    let response;
-    try {
-      response = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body,
-        signal: controller.signal,
-      });
-    } catch (e) {
-      clearTimeout(timeoutId);
-      if (e.name === 'AbortError') throw new Error('通信がタイムアウトしました(60秒)。画像の枚数を減らすかWi-Fi環境で再試行してください');
-      throw new Error('通信に失敗しました(ネットワークエラー)。電波状況を確認し、枚数を減らして再試行してください');
-    }
-    clearTimeout(timeoutId);
-
-    if (!response.ok) {
-      let detail = '';
-      try { detail = (await response.text()).slice(0, 200); } catch (e) { /* ignore */ }
-      throw new Error(`APIエラー(${response.status})${detail ? ': ' + detail : ''}`);
-    }
-    // response.json()を直接呼ぶとSafariでレスポンス内容によっては
-    // 汎用DOMException("The string did not match the expected pattern")になり
-    // 原因が分からなくなることがあるため、一度text()で受けてから手動でJSON.parseする。
-    let rawText;
-    try {
-      rawText = await response.text();
-    } catch (e) {
-      throw new Error('APIレスポンスの読み取りに失敗しました');
-    }
-    if (!rawText || !rawText.trim()) {
-      // まれに本文が空で返ってくることがある(通信の瞬断など)。再試行の対象にする。
-      throw new Error('EMPTY_RESPONSE');
-    }
-    return rawText;
-  };
-
-  let rawText;
-  try {
-    rawText = await attemptFetch();
-  } catch (firstErr) {
-    // 1回だけ自動リトライ(モバイル回線の瞬断・空応答対策)
-    try {
-      rawText = await attemptFetch();
-    } catch (secondErr) {
-      if (secondErr.message === 'EMPTY_RESPONSE') {
-        throw new Error('サーバーから空の応答が返ってきました。もう一度「画像を解析する」を押して再試行してください');
-      }
-      throw secondErr;
-    }
-  }
-
-  let data;
-  try {
-    data = JSON.parse(rawText);
-  } catch (e) {
-    throw new Error(`APIレスポンスがJSONではありません: ${rawText.slice(0, 200)}`);
-  }
-  const text = (data.content || []).map(item => item.text || '').join('\n');
-  const clean = text.replace(/```json|```/g, '').trim();
-  let parsed;
-  try {
-    parsed = JSON.parse(clean);
-  } catch (e) {
-    throw new Error('AIの応答をJSONとして解析できませんでした');
-  }
-  if (!parsed || !Array.isArray(parsed.boats) || parsed.boats.length === 0) {
-    throw new Error('画像から艇データを読み取れませんでした');
-  }
-  return parsed;
+async function callVisionAPI(_images) {
+  throw new Error('公開版では画像解析APIは未設定です。現在は①〜③のテキスト入力を利用してください。');
 }
 
 function normalizeAIBoats(boats) {
