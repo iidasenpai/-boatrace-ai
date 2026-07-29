@@ -1031,33 +1031,56 @@ const VISION_PROMPT = `あなたは競艇(ボートレース)の出走表・直�
 boatsは必ずlane 1〜6の6艇分を含めてください。今節成績の着順は色付きの丸数字や下線付き数字として表示されていることが多いので、見えている範囲はできるだけ拾ってください。`;
 
 async function callVisionAPI(images) {
-  const response = await fetch(
-    'https://geminiapikey.uimaru02.workers.dev',
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        images: images.map(image => ({
-          mimeType: image.mediaType,
-          data: image.base64,
-        })),
-      }),
-    }
-  );
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 70000);
 
-  const result = await response.json();
-
-  if (!response.ok || !result.success) {
-    throw new Error(
-      result.details ||
-      result.error ||
-      '画像解析APIでエラーが発生しました'
+  try {
+    const response = await fetch(
+      'https://geminiapikey.uimaru02.workers.dev',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          images: images.map(image => ({
+            mimeType: image.mediaType,
+            data: image.base64,
+          })),
+        }),
+        signal: controller.signal,
+      }
     );
-  }
 
-  return result.data;
+    let result = {};
+    try {
+      result = await response.json();
+    } catch {
+      result = {};
+    }
+
+    if (!response.ok || !result.success) {
+      const err = new Error(
+        result.error ||
+        result.details ||
+        '画像解析APIでエラーが発生しました'
+      );
+      err.retryable = Boolean(result.retryable) || [429, 502, 503, 504].includes(response.status);
+      err.status = response.status;
+      throw err;
+    }
+
+    return result.data;
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      const timeoutError = new Error('AIサーバーの応答がタイムアウトしました。画像は保持されています。再試行してください。');
+      timeoutError.retryable = true;
+      throw timeoutError;
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 function normalizeAIBoats(
@@ -1391,6 +1414,7 @@ export default function BoatRaceTool() {
   const [images, setImages] = useState([]);
   const [imageLoading, setImageLoading] = useState(false);
   const [imageError, setImageError] = useState('');
+  const [imageCanRetry, setImageCanRetry] = useState(false);
   const [statsResult, setStatsResult] = useState(null);
   const [statsLoading, setStatsLoading] = useState(false);
 
@@ -1445,6 +1469,7 @@ export default function BoatRaceTool() {
 
   const handleImagesSelected = async (fileList) => {
     setImageError('');
+    setImageCanRetry(false);
     const files = Array.from(fileList || []);
     if (!files.length) return;
     try {
@@ -1459,6 +1484,8 @@ export default function BoatRaceTool() {
   };
 
   const handleRemoveImage = (idx) => {
+    setImageError('');
+    setImageCanRetry(false);
     setImages(prev => prev.filter((_, i) => i !== idx));
   };
 
@@ -1466,6 +1493,7 @@ export default function BoatRaceTool() {
     if (!images.length) { setImageError('画像を追加してください'); return; }
     setImageLoading(true);
     setImageError('');
+    setImageCanRetry(false);
     try {
       const result = await callVisionAPI(images);
       const normalized = normalizeAIBoats(
@@ -1498,7 +1526,10 @@ setAnaResult(autoAnaResult);
 setForecast(generateForecast(scored));
       const missingCount = normalized.filter(b => !b.hasData).length;
       setStatus(missingCount ? `画像解析完了(${6 - missingCount}/6艇分を検出、${missingCount}艇はデータ不足)` : '画像解析完了(6艇分を検出)');
+      setImageCanRetry(false);
     } catch (e) {
+      const retryable = Boolean(e && e.retryable);
+      setImageCanRetry(retryable);
       setImageError((e && e.message) ? e.message : '画像の解析に失敗しました');
     } finally {
       setImageLoading(false);
@@ -1672,7 +1703,18 @@ setForecast(generateForecast(scored));
             }}>
             {imageLoading ? '解析中...' : '画像を解析する'}
           </button>
-          {imageError && <div style={{ fontSize: 12, color: '#ff6b6b', marginTop: 6 }}>{imageError}</div>}
+          {imageError && (
+            <div style={{ marginTop: 8, border: '1px solid #7a3a3a', background: '#2a171b', borderRadius: 6, padding: 10 }}>
+              <div style={{ fontSize: 12, color: '#ff9b9b', lineHeight: 1.55 }}>{imageError}</div>
+              {imageCanRetry && (
+                <button onClick={handleAnalyzeImages} disabled={imageLoading}
+                  style={{ marginTop: 8, background: '#1857b0', color: '#fff', border: 'none', borderRadius: 6, padding: '8px 14px', fontWeight: 700, fontSize: 12, cursor: imageLoading ? 'default' : 'pointer' }}>
+                  {imageLoading ? '再試行中...' : '同じ画像でもう一度試す'}
+                </button>
+              )}
+              <div style={{ fontSize: 11, color: '#b7c4d4', marginTop: 6 }}>選択した画像は消えません。混雑時は10〜30秒ほど待って再試行してください。</div>
+            </div>
+          )}
         </div>
 
         {status && <div style={{ fontSize: 12, color: '#8ba3bd', marginBottom: 14 }}>{status}</div>}
