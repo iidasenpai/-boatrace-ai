@@ -547,7 +547,7 @@ function getFlowSuitability(combo, boats) {
   else if (course === 4 && Number(first.gearScore || 0) >= 55) courseBonus = 7;
   else if ((course === 2 || course === 3) && first.exST != null && first.exST <= 0.10) courseBonus = 5;
 
-  return Math.round(clampScore(power + courseBonus));
+  return Math.round(clampScore(power + courseBonus, 15, 95));
 }
 
 function getValueScore(bet) {
@@ -574,9 +574,9 @@ function rankAndAllocateBets(bets, boats, budgetYen) {
     const flowScore = getFlowSuitability(bet.combo, boats);
     const rawIndex = clampScore(hitScore * 0.62 + valueScore * 0.20 + flowScore * 0.18);
     // 表示用AI指数は70〜100中心に再スケールし、レース信頼度との見た目の乖離を抑える
-    const aiIndex = Math.round((70 + rawIndex * 0.30) * 10) / 10;
-    const rankLabel = aiIndex >= 94 ? '超本命' : aiIndex >= 88 ? '本命' : aiIndex >= 82 ? '強め' : aiIndex >= 76 ? 'バランス' : '高配当寄り';
-    const rankLevel = aiIndex >= 88 ? 'main' : aiIndex >= 76 ? 'balance' : 'longshot';
+    const aiIndex = Math.round((62 + rawIndex * 0.33) * 10) / 10;
+    const rankLabel = aiIndex >= 92 ? '超本命' : aiIndex >= 85 ? '本命' : aiIndex >= 79 ? '強め' : aiIndex >= 72 ? 'バランス' : '高配当寄り';
+    const rankLevel = aiIndex >= 85 ? 'main' : aiIndex >= 72 ? 'balance' : 'longshot';
 
     const selected = String(bet.combo).split('-').map(Number).map(lane => boats.find(b => b.lane === lane)).filter(Boolean);
     const weighted = (key, fallback = 50) => {
@@ -626,14 +626,30 @@ function rankAndAllocateBets(bets, boats, budgetYen) {
 }
 
 function findAnaCandidate(boats) {
-  const outer = boats.filter(b => b.rank >= 4);
-  if (outer.length === 0) return null;
-  return outer.reduce((best, b) => {
-    const val = b.gearScore + b.exScore * 0.5;
-    const bestVal = best ? best.gearScore + best.exScore * 0.5 : -1;
-    return val > bestVal ? b : best;
+  const candidates = boats.filter(b => {
+    if (b.rank < 3 || b.rank > 5) return false;
+    const hasClearWeapon =
+      b.classG === 'A1' ||
+      Number(b.exScore || 0) >= 68 ||
+      Number(b.stScore || 0) >= 68 ||
+      Number(b.gearScore || 0) >= 62 ||
+      Number(b.targetScore || 0) >= 55;
+    return hasClearWeapon;
+  });
+  if (candidates.length === 0) return null;
+  return candidates.reduce((best, b) => {
+    const value =
+      Number(b.targetScore || 0) * 0.30 +
+      Number(b.exScore || 0) * 0.25 +
+      Number(b.stScore || 0) * 0.18 +
+      Number(b.gearScore || 0) * 0.17 +
+      (b.classG === 'A1' ? 12 : 0) +
+      b.rank * 2;
+    const bestValue = best ? best._anaValue : -1;
+    return value > bestValue ? { ...b, _anaValue: value } : best;
   }, null);
 }
+
 
 function generateAnaBets(boats, betType, budgetYen) {
   const anaBoat = findAnaCandidate(boats);
@@ -1060,9 +1076,12 @@ function normalizeAIBoats(
       .map((e) => Number(e.st))
       .filter((v) => !Number.isNaN(v));
 
-    const konsetsuAvgST = stValues.length
-      ? stValues.reduce((a, c) => a + c, 0) / stValues.length
-      : null;
+    const explicitSeriesAvgST = Number(b.currentSeriesAverageST ?? b.konsetsuAvgST);
+    const konsetsuAvgST = Number.isFinite(explicitSeriesAvgST)
+      ? explicitSeriesAvgST
+      : stValues.length
+        ? stValues.reduce((a, c) => a + c, 0) / stValues.length
+        : null;
 
     return {
       lane,
@@ -1134,6 +1153,21 @@ function normalizeAIBoats(
 
     
 
+function getDisplayScore(boat, allBoats) {
+  if (!boat || !Array.isArray(allBoats) || allBoats.length === 0) return 50;
+  const values = allBoats.map(b => Number(b.total)).filter(Number.isFinite);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  if (!Number.isFinite(min) || !Number.isFinite(max) || max === min) return 70;
+  const relative = (Number(boat.total) - min) / (max - min);
+  return Math.round(52 + relative * 38);
+}
+
+function getComponentDisplayScore(value, hasSource = true) {
+  if (!hasSource || value === null || value === undefined || !Number.isFinite(Number(value))) return null;
+  return Math.round(Math.max(10, Math.min(95, Number(value))));
+}
+
 function scoreStars(score) {
   const n = Math.max(1, Math.min(5, Math.round((score || 0) / 20)));
   return '★'.repeat(n) + '☆'.repeat(5 - n);
@@ -1150,25 +1184,37 @@ function scoreColor(score) {
 function getRaceSummary(boats) {
   if (!boats || boats.length === 0) return null;
   const top = boats[0];
+  const second = boats[1];
   const c1 = boats.find(b => b.entryCourse === 1);
-  const confidence = top.raceConfidence ?? top.confidence ?? 50;
-  const chaosIndex = top.chaosIndex ?? 50;
+  const rawConfidence = Number(top.raceConfidence ?? top.confidence ?? 50);
+  const chaosIndex = Number(top.chaosIndex ?? 50);
+  const topGap = second ? Number(top.total || 0) - Number(second.total || 0) : 0;
+  const evidenceScore = [top.playerScore, top.gearScore, top.exScore, top.stScore]
+    .map(Number).filter(Number.isFinite)
+    .reduce((a, c, _, arr) => a + c / Math.max(1, arr.length), 0);
+  const dominanceScore = clampScore(55 + topGap * 3);
+  const confidence = Math.round(clampScore(rawConfidence * 0.45 + dominanceScore * 0.30 + evidenceScore * 0.25, 25, 94));
   const escapeRate = c1
-    ? Math.max(5, Math.min(95, Math.round(
-        35 +
-        (c1.courseScore || 0) * 0.45 +
-        (c1.stScore || 50) * 0.18 +
-        (c1.gearScore || 50) * 0.12 -
-        (c1.dangerScore || 0) * 0.28
+    ? Math.max(5, Math.min(92, Math.round(
+        28 +
+        (c1.courseScore || 0) * 0.38 +
+        (c1.stScore || 50) * 0.16 +
+        (c1.gearScore || 50) * 0.10 +
+        (c1.exScore || 50) * 0.08 -
+        (c1.dangerScore || 0) * 0.25
       )))
     : null;
 
   return {
     confidence,
-    confidenceLabel: top.raceConfidenceLabel || (confidence >= 70 ? '高い' : confidence >= 55 ? '標準' : '低め'),
+    rawConfidence,
+    confidenceLabel: confidence >= 84 ? 'かなり高い' : confidence >= 72 ? '高い' : confidence >= 58 ? '標準' : '低め',
     chaosIndex,
     chaosStars: top.chaosStars || Math.max(1, Math.ceil(chaosIndex / 20)),
     escapeRate,
+    topGap,
+    topExScore: Number(top.exScore || 0),
+    topStScore: Number(top.stScore || 0),
     bestBoat: top,
     dangerBoat: [...boats].sort((a, b) => (b.dangerScore || 0) - (a.dangerScore || 0))[0],
     targetBoat: [...boats].sort((a, b) => (b.targetScore || 0) - (a.targetScore || 0))[0],
@@ -1205,13 +1251,18 @@ function getRaceGrade(summary) {
   if (!summary) return { grade: 'C', label: '見送り', color: '#ff6b6b', stars: '★★☆☆☆', danger: 'DANGER', recommendation: 30 };
   const confidence = Number(summary.confidence || 0);
   const chaos = Number(summary.chaosIndex || 50);
-  const recommendation = Math.max(0, Math.min(100, Math.round(confidence * 0.72 + (100 - chaos) * 0.28)));
-  if (confidence >= 92 && chaos <= 35) return { grade: 'S+', label: '鉄板級', color: '#e68cff', stars: '★★★★★', danger: 'SAFE', recommendation };
-  if (confidence >= 84 && chaos <= 48) return { grade: 'S', label: '激アツ', color: '#c77dff', stars: '★★★★★', danger: 'SAFE', recommendation };
-  if (confidence >= 72 && chaos <= 65) return { grade: 'A', label: '買い', color: '#52d273', stars: '★★★★☆', danger: chaos <= 45 ? 'SAFE' : 'NORMAL', recommendation };
-  if (confidence >= 58) return { grade: 'B', label: '様子見', color: '#e8b800', stars: '★★★☆☆', danger: chaos >= 75 ? 'CHAOS' : 'DANGER', recommendation };
+  const gap = Number(summary.topGap || 0);
+  const ex = Number(summary.topExScore || 0);
+  const st = Number(summary.topStScore || 0);
+  const recommendation = Math.max(0, Math.min(100, Math.round(confidence * 0.75 + (100 - chaos) * 0.25)));
+  const eliteEvidence = gap >= 13 && ex >= 72 && st >= 62;
+  if (confidence >= 92 && chaos <= 28 && eliteEvidence) return { grade: 'S+', label: '鉄板級', color: '#e68cff', stars: '★★★★★', danger: 'SAFE', recommendation };
+  if (confidence >= 85 && chaos <= 42 && gap >= 8 && ex >= 55) return { grade: 'S', label: '本命勝負', color: '#c77dff', stars: '★★★★★', danger: 'SAFE', recommendation };
+  if (confidence >= 73 && chaos <= 65) return { grade: 'A', label: '買い候補', color: '#52d273', stars: '★★★★☆', danger: chaos <= 45 ? 'SAFE' : 'NORMAL', recommendation };
+  if (confidence >= 58) return { grade: 'B', label: '絞って検討', color: '#e8b800', stars: '★★★☆☆', danger: chaos >= 75 ? 'CHAOS' : 'DANGER', recommendation };
   return { grade: 'C', label: '見送り', color: '#ff6b6b', stars: '★★☆☆☆', danger: chaos >= 75 ? 'CHAOS' : 'DANGER', recommendation };
 }
+
 
 function buildLearningSummary(races) {
   const completed = (Array.isArray(races) ? races : []).filter(r => parseResultLanes(r.result)?.length >= 3);
@@ -1636,7 +1687,7 @@ setForecast(generateForecast(scored));
                   <div style={{ fontSize: 18, fontWeight: 800, color: '#e8b800' }}>
                     {raceSummary.bestBoat.lane}号艇
                   </div>
-                  <div style={{ fontSize: 10, color: '#c5d3e0' }}>{raceSummary.bestBoat.mark} 総合{Math.round(raceSummary.bestBoat.total)}点</div>
+                  <div style={{ fontSize: 10, color: '#c5d3e0' }}>{raceSummary.bestBoat.mark} AI評価{getDisplayScore(raceSummary.bestBoat, boats)}点</div>
                 </div>
                 <div style={{ background: '#0f1a28', borderRadius: 8, padding: 10 }}>
                   <div style={{ fontSize: 10, color: '#8ba3bd' }}>1コース逃げ</div>
@@ -1700,15 +1751,15 @@ setForecast(generateForecast(scored));
                 }}>{b.lane}</div>
                 <div style={{ fontWeight: 800, color: '#e8b800' }}>{b.mark}</div>
                 <div>
-                  <div style={{ fontSize: 12, color: scoreColor(b.total), fontWeight: 800 }}>
-                    {scoreStars(b.total)}
+                  <div style={{ fontSize: 12, color: scoreColor(getDisplayScore(b, boats)), fontWeight: 800 }}>
+                    {scoreStars(getDisplayScore(b, boats))}
                   </div>
                   <div style={{ fontSize: 10, color: '#8ba3bd' }}>
                     実力{Math.round(b.playerScore)} / 機力{Math.round(b.gearScore)} / 展示{Math.round(b.exScore)} / ST{Math.round(b.stScore)}
                   </div>
                 </div>
-                <div style={{ fontSize: 18, fontWeight: 900, color: scoreColor(b.total) }}>
-                  {Math.round(b.total)}
+                <div style={{ fontSize: 18, fontWeight: 900, color: scoreColor(getDisplayScore(b, boats)) }}>
+                  {getDisplayScore(b, boats)}
                 </div>
               </div>
             ))}
@@ -1718,6 +1769,8 @@ setForecast(generateForecast(scored));
         {/* Results table */}
         {boats && (
           <div style={{ marginBottom: 20 }}>
+            <details style={{ marginBottom: 12 }}>
+              <summary style={{ cursor: 'pointer', color: '#8ba3bd', fontSize: 12, fontWeight: 700, padding: '8px 0' }}>艇別詳細データを表示</summary>
             {boats.map(b => (
               <div key={b.lane} style={{
                 display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px', marginBottom: 6,
@@ -1733,12 +1786,13 @@ setForecast(generateForecast(scored));
                     {b.classG || '-'} {b.isOuterAce && <span style={{ color: '#e8b800', fontWeight: 700 }}>★エース</span>} {b.isOuterGearAce && <span style={{ color: '#7aff9b', fontWeight: 700 }}>⚡機力エース</span>} {b.exhibitF && <span style={{ color: '#ff6b6b', fontWeight: 700 }}>F</span>} {b.isChaosRace && !b.exhibitF && <span style={{ color: '#1f8a4c', fontWeight: 700 }}>クリーン</span>} {b.tiltBonus > 0 && <span style={{ color: '#7aa6e8', fontWeight: 700 }}>チルト◎</span>} {b.partsExchanged && <span style={{ color: '#ff9b6b', fontWeight: 700 }}>部品交換</span>} 進入{b.entryCourse}コース
                   </div>
                   <div style={{ fontSize: 11, color: '#8ba3bd' }}>
-                    全国2連{b.nat2?.toFixed?.(1) ?? '-'} / モーター2連{b.motor2?.toFixed?.(1) ?? '-'} / 展示{b.exTime ?? '-'} / 展示ST{b.exST != null ? b.exST.toFixed(2) : '-'} / 今節平均ST{b.konsetsuAvgST != null ? b.konsetsuAvgST.toFixed(2) : '-'}
+                    全国2連{b.nat2?.toFixed?.(1) ?? '-'} / モーター2連{b.motor2?.toFixed?.(1) ?? '-'} / 展示{b.exTime ?? '-'} / 展示ST{b.exST != null ? b.exST.toFixed(2) : '-'}{b.konsetsuAvgST != null ? ` / 今節平均ST${b.konsetsuAvgST.toFixed(2)}` : ''}
                   </div>
                 </div>
-                <div style={{ fontSize: 15, fontWeight: 700, flexShrink: 0 }}>{Math.round(b.total * 10) / 10}</div>
+                <div style={{ fontSize: 15, fontWeight: 700, flexShrink: 0 }}>{getDisplayScore(b, boats)}</div>
               </div>
             ))}
+            </details>
 
             <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
               <input placeholder="保存メモ(任意)" value={saveNote} onChange={e => setSaveNote(e.target.value)}
@@ -1856,7 +1910,7 @@ setForecast(generateForecast(scored));
                             <div style={{ marginTop: 5 }}>
                               <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: 11, fontWeight: 800, color: valueColor }}>
                                 <span>💎 妙味：{b.returnExpectationLabel}</span>
-                                <span>参考回収率 {b.returnExpectationScore}%</span>
+                                <span>参考妙味 {b.returnExpectationScore}点</span>
                               </div>
                               <div style={{ height: 5, background: '#0b1420', borderRadius: 999, marginTop: 3, overflow: 'hidden' }}>
                                 <div
@@ -1916,14 +1970,14 @@ setForecast(generateForecast(scored));
                       display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 20, height: 20, borderRadius: 4,
                       background: LANE_COLORS[anaResult.anaBoat.lane].bg, color: LANE_COLORS[anaResult.anaBoat.lane].text, fontWeight: 700, fontSize: 12,
                     }}>{anaResult.anaBoat.lane}</span>
-                    <span>号艇(印{anaResult.anaBoat.mark} / 順位{anaResult.anaBoat.rank}位 だが機力スコア{Math.round(anaResult.anaBoat.gearScore)})</span>
+                    <span>号艇（印{anaResult.anaBoat.mark} / 順位{anaResult.anaBoat.rank}位・展示{Math.round(anaResult.anaBoat.exScore)}・ST{Math.round(anaResult.anaBoat.stScore)}・機力{Math.round(anaResult.anaBoat.gearScore)}）</span>
                   </div>
                   <div style={{
                     display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 7,
                     background: '#101c2a', border: '1px solid #1857b0', borderRadius: 8,
                     padding: 9, marginBottom: 8, fontSize: 11,
                   }}>
-                    <div><div style={{ color: '#8ba3bd' }}>穴期待</div><div style={{ color: '#7aa6e8', fontWeight: 900 }}>{getStars(Math.min(100, 45 + Number(anaResult.anaBoat.gearScore || 0) * 0.7))}</div></div>
+                    <div><div style={{ color: '#8ba3bd' }}>穴期待</div><div style={{ color: '#7aa6e8', fontWeight: 900 }}>{getStars(Math.min(100, Number(anaResult.anaBoat._anaValue || 55)))}</div></div>
                     <div><div style={{ color: '#8ba3bd' }}>妙味</div><div style={{ color: '#ffd54a', fontWeight: 900 }}>{anaResult.anaBoat.rank >= 5 ? '高' : '標準'}</div></div>
                     <div><div style={{ color: '#8ba3bd' }}>推奨</div><div style={{ color: '#e8edf2', fontWeight: 900 }}>{anaResult.bets[0]?.yen ?? 100}円〜</div></div>
                   </div>

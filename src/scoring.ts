@@ -170,8 +170,10 @@ export function norm(
 
   if (high === low) return 50;
 
-  const score = clamp(((v - low) / (high - low)) * 100, 0, 100);
-  return invert ? 100 - score : score;
+  const percentile = clamp(((v - low) / (high - low)) * 100, 0, 100);
+  const oriented = invert ? 100 - percentile : percentile;
+  // 1レース6艇の相対比較で0/100が乱発しないよう、実用域へ平滑化する。
+  return 12 + oriented * 0.76;
 }
 
 function weightedAverage(parts: Array<[number, number]>): number {
