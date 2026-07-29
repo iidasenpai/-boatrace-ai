@@ -425,85 +425,121 @@ function calculateReturnExpectation(
   };
 }
 
+function calculateRaceFitScore(combo, boats) {
+  const lanes = String(combo)
+    .replace(/[‐-‒–—−ー]/g, '-')
+    .split('-')
+    .map(Number);
+
+  if (lanes.length !== 3 || lanes.some(lane => !Number.isFinite(lane))) {
+    return 50;
+  }
+
+  const totals = boats
+    .map(boat => Number(boat?.total))
+    .filter(Number.isFinite);
+
+  if (!totals.length) return 50;
+
+  const maxTotal = Math.max(...totals);
+  const minTotal = Math.min(...totals);
+  const range = Math.max(1, maxTotal - minTotal);
+  const weights = [0.5, 0.3, 0.2];
+
+  return Math.round(
+    lanes.reduce((sum, lane, index) => {
+      const boat = boats.find(item => Number(item?.lane) === lane);
+      const total = Number(boat?.total);
+      const normalized = Number.isFinite(total)
+        ? ((total - minTotal) / range) * 100
+        : 50;
+      return sum + normalized * weights[index];
+    }, 0)
+  );
+}
+
 function addExpectedValueToBets(bets, boats) {
   if (!Array.isArray(bets)) return [];
 
   const oddsMap = collectOddsMap(boats);
-  const positionReturns =
-    collectPositionReturns(boats);
+  const positionReturns = collectPositionReturns(boats);
+  const validProbabilities = bets
+    .map(bet => Number(bet?.prob))
+    .filter(Number.isFinite);
+  const maxProbability = Math.max(1, ...validProbabilities);
 
-  return bets.map((bet) => {
-    const normalizedCombo = String(bet.combo)
-      .replace(/[‐-‒–—−ー]/g, '-')
-      .replace(/\s/g, '');
+  return bets
+    .map((bet) => {
+      const normalizedCombo = String(bet.combo)
+        .replace(/[‐-‒–—−ー]/g, '-')
+        .replace(/\s/g, '');
 
-    const odds =
-      oddsMap[normalizedCombo] ?? null;
+      const odds = oddsMap[normalizedCombo] ?? null;
+      const probability = typeof bet.prob === 'number' ? bet.prob / 100 : null;
+      const expectedValue =
+        odds !== null && probability !== null
+          ? probability * odds * 100
+          : null;
+      const expectedProfit =
+        expectedValue !== null
+          ? Math.round(bet.yen * (expectedValue / 100 - 1))
+          : null;
 
-    const probability =
-      typeof bet.prob === 'number'
-        ? bet.prob / 100
-        : null;
-
-    const expectedValue =
-      odds !== null && probability !== null
-        ? probability * odds * 100
-        : null;
-
-    const expectedProfit =
-      expectedValue !== null
-        ? Math.round(
-            bet.yen *
-              (expectedValue / 100 - 1)
-          )
-        : null;
-
-    let evLabel = 'オッズ未取得';
-
-    if (expectedValue !== null) {
-      if (expectedValue >= 130) {
-        evLabel = '強く買い候補';
-      } else if (expectedValue >= 110) {
-        evLabel = '買い候補';
-      } else if (expectedValue >= 100) {
-        evLabel = '検討候補';
-      } else {
-        evLabel = '見送り候補';
+      let evLabel = 'オッズ未取得';
+      if (expectedValue !== null) {
+        if (expectedValue >= 130) evLabel = '強く買い候補';
+        else if (expectedValue >= 110) evLabel = '買い候補';
+        else if (expectedValue >= 100) evLabel = '検討候補';
+        else evLabel = '見送り候補';
       }
-    }
 
-    const returnExpectation =
-      calculateReturnExpectation(
+      const returnExpectation = calculateReturnExpectation(
         normalizedCombo,
         positionReturns
       );
 
-    return {
-      ...bet,
-      odds,
+      const probabilityScore = Number.isFinite(bet.prob)
+        ? Math.min(100, (bet.prob / maxProbability) * 100)
+        : 0;
+      const returnScore = returnExpectation.score !== null
+        ? Math.max(0, Math.min(100, (returnExpectation.score / 150) * 100))
+        : 50;
+      const raceFitScore = calculateRaceFitScore(normalizedCombo, boats);
 
-      expectedValue:
-        expectedValue !== null
-          ? Math.round(expectedValue)
-          : null,
+      // 的中しやすさ65%・回収率参考25%・展開/艇力一致10%
+      const recommendationScore = bet.insurance
+        ? 0
+        : Math.round(
+            (probabilityScore * 0.65 +
+              returnScore * 0.25 +
+              raceFitScore * 0.1) * 10
+          ) / 10;
 
-      expectedProfit,
-      evLabel,
+      let recommendationLabel = 'バランス';
+      if (recommendationScore >= 75) recommendationLabel = '本命';
+      else if (recommendationScore < 50) recommendationLabel = '高配当寄り';
 
-      returnExpectationScore:
-        returnExpectation.score,
-
-      returnExpectationLabel:
-        returnExpectation.label,
-
-      returnExpectationLevel:
-        returnExpectation.level,
-
-      returnExpectationDetails:
-        returnExpectation.details,
-    };
-  });
+      return {
+        ...bet,
+        odds,
+        expectedValue: expectedValue !== null ? Math.round(expectedValue) : null,
+        expectedProfit,
+        evLabel,
+        returnExpectationScore: returnExpectation.score,
+        returnExpectationLabel: returnExpectation.label,
+        returnExpectationLevel: returnExpectation.level,
+        returnExpectationDetails: returnExpectation.details,
+        raceFitScore,
+        recommendationScore,
+        recommendationLabel,
+      };
+    })
+    .sort((a, b) => {
+      if (a.insurance !== b.insurance) return a.insurance ? 1 : -1;
+      return (b.recommendationScore || 0) - (a.recommendationScore || 0);
+    });
 }
+
   
 
 function findAnaCandidate(boats) {
@@ -1602,7 +1638,13 @@ setForecast(generateForecast(scored));
         <div>1号艇飛び目</div>
       ) : (
         <>
-          <div>目安確率 {b.prob}%</div>
+          <div style={{ marginBottom: 2, fontWeight: 800, color: '#e8edf2' }}>
+            {b.recommendationLabel === '本命' && '🟢 本命'}
+            {b.recommendationLabel === 'バランス' && '🟡 バランス'}
+            {b.recommendationLabel === '高配当寄り' && '🔴 高配当寄り'}
+            {` ／ 総合${b.recommendationScore}`}
+          </div>
+          <div>目安確率 {b.prob}% ／ 展開一致 {b.raceFitScore}</div>
 
           {b.odds !== null &&
           b.odds !== undefined ? (
@@ -1652,10 +1694,10 @@ setForecast(generateForecast(scored));
               {b.returnExpectationLevel === 'standard' && '🟡 '}
               {b.returnExpectationLevel === 'low' && '🔴 '}
 
-              回収率期待：{b.returnExpectationLabel}
+              回収率参考：{b.returnExpectationLabel}
 
               {b.returnExpectationScore !== null &&
-                `（参考${b.returnExpectationScore}）`}
+                `（${b.returnExpectationScore}%）`}
             </div>
           )}
         </>
