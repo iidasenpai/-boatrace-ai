@@ -724,6 +724,9 @@ function normalizeAIBoats(boats) {
             item.startTiming ??
             item
 
+    };
+  });
+}
 
 function scoreStars(score) {
   const n = Math.max(1, Math.min(5, Math.round((score || 0) / 20)));
