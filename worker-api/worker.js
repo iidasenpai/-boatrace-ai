@@ -1,5 +1,85 @@
 const ALLOWED_ORIGIN = "https://iidasenpai.github.io";
 
+const GEMINI_MODEL = "gemini-3.6-flash";
+const MAX_GEMINI_ATTEMPTS = 3;
+const GEMINI_TIMEOUT_MS = 45000;
+const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isDemandError(status, message = "") {
+  const text = String(message).toLowerCase();
+  return status === 429 || status === 503 ||
+    text.includes("high demand") ||
+    text.includes("overloaded") ||
+    text.includes("resource exhausted") ||
+    text.includes("temporarily unavailable");
+}
+
+async function callGeminiWithRetry(env, payload) {
+  let lastStatus = 502;
+  let lastMessage = "AIサーバーから応答を受け取れませんでした。";
+
+  for (let attempt = 1; attempt <= MAX_GEMINI_ATTEMPTS; attempt += 1) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS);
+
+    try {
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-goog-api-key": env.GEMINI_API_KEY,
+          },
+          body: JSON.stringify(payload),
+          signal: controller.signal,
+        }
+      );
+
+      let result = {};
+      try {
+        result = await response.json();
+      } catch {
+        result = {};
+      }
+
+      if (response.ok) {
+        return { response, result, attempts: attempt };
+      }
+
+      lastStatus = response.status;
+      lastMessage = result?.error?.message || `Gemini APIエラー (${response.status})`;
+      const retryable = RETRYABLE_STATUS.has(response.status) || isDemandError(response.status, lastMessage);
+
+      if (!retryable || attempt === MAX_GEMINI_ATTEMPTS) break;
+      await sleep(1200 * attempt);
+    } catch (error) {
+      lastStatus = error?.name === "AbortError" ? 504 : 502;
+      lastMessage = error?.name === "AbortError"
+        ? "AIサーバーの応答がタイムアウトしました。"
+        : (error instanceof Error ? error.message : String(error));
+
+      if (attempt === MAX_GEMINI_ATTEMPTS) break;
+      await sleep(1200 * attempt);
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  const demand = isDemandError(lastStatus, lastMessage);
+  const err = new Error(lastMessage);
+  err.status = demand ? 503 : lastStatus;
+  err.retryable = demand || RETRYABLE_STATUS.has(lastStatus);
+  err.userMessage = demand
+    ? "AIサーバーが混雑しています。画像は保持されていますので、少し待ってから再試行してください。"
+    : "画像解析に失敗しました。通信状態を確認して再試行してください。";
+  throw err;
+}
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
   "Access-Control-Allow-Methods": "POST, OPTIONS",
@@ -188,39 +268,17 @@ boatsは1号艇から6号艇の順に整理してください。
 同タイムや最下位の艇も値を省略せず、画像にある実数をそのまま返してください。
 `;
 
-      const geminiResponse = await fetch(
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent",
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-goog-api-key": env.GEMINI_API_KEY,
-          },
-          body: JSON.stringify({
-            contents: [
-              {
-                role: "user",
-                parts: [{ text: prompt }, ...imageParts],
-              },
-            ],
-            generationConfig: {
-              responseMimeType: "application/json",
-            },
-          }),
-        }
-      );
-
-      const result = await geminiResponse.json();
-
-      if (!geminiResponse.ok) {
-        return json(
+      const { result, attempts } = await callGeminiWithRetry(env, {
+        contents: [
           {
-            error: "Gemini APIでエラーが発生しました。",
-            details: result?.error?.message || "詳細不明のエラーです。",
+            role: "user",
+            parts: [{ text: prompt }, ...imageParts],
           },
-          geminiResponse.status
-        );
-      }
+        ],
+        generationConfig: {
+          responseMimeType: "application/json",
+        },
+      });
 
       const text = result?.candidates?.[0]?.content?.parts
         ?.map((part) => part.text || "")
@@ -244,14 +302,16 @@ boatsは1号艇から6号艇の順に整理してください。
         );
       }
 
-      return json({ success: true, data: parsed });
+      return json({ success: true, data: parsed, attempts });
     } catch (error) {
+      const status = Number(error?.status) || 500;
       return json(
         {
-          error: "Workerでエラーが発生しました。",
+          error: error?.userMessage || "Workerでエラーが発生しました。",
           details: error instanceof Error ? error.message : String(error),
+          retryable: Boolean(error?.retryable),
         },
-        500
+        status
       );
     }
   },
