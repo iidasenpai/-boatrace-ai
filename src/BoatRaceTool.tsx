@@ -1702,7 +1702,7 @@ setForecast(generateForecast(scored));
       )}
     </>
   )}
-</div>
+
                       <div style={{ fontWeight: 700, fontSize: 14, color: '#e8b800' }}>{b.yen}円</div>
                     </div>
                   ))}
