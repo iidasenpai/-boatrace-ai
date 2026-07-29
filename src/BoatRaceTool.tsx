@@ -1181,6 +1181,54 @@ function scoreColor(score) {
   return '#ff6b6b';
 }
 
+function componentColor(score) {
+  const n = Number(score);
+  if (!Number.isFinite(n)) return '#8ba3bd';
+  if (n >= 75) return '#52d273';
+  if (n >= 58) return '#e8b800';
+  if (n >= 42) return '#9fb2c6';
+  return '#ff6b6b';
+}
+
+function getRealtimeTrend(boat) {
+  if (!boat) return { delta: 0, label: '→', color: '#8ba3bd' };
+  const ex = Number.isFinite(Number(boat.exScore)) ? Number(boat.exScore) : 50;
+  const st = Number.isFinite(Number(boat.stScore)) ? Number(boat.stScore) : 50;
+  const gear = Number.isFinite(Number(boat.gearScore)) ? Number(boat.gearScore) : 50;
+  // 直前情報によって基礎評価が何点動いたかを表す表示用差分。
+  const delta = Math.round(((ex - 50) * 0.10 + (st - 50) * 0.08 + (gear - 50) * 0.03));
+  if (delta >= 2) return { delta, label: `↑${delta}`, color: '#52d273' };
+  if (delta <= -2) return { delta, label: `↓${Math.abs(delta)}`, color: '#ff6b6b' };
+  return { delta, label: '→', color: '#8ba3bd' };
+}
+
+function generateBetComment(bet, boats) {
+  const lanes = String(bet?.combo || '').split('-').map(Number);
+  const selected = lanes.map(lane => boats?.find(b => b.lane === lane)).filter(Boolean);
+  if (selected.length < 3) return '総合評価と展開適性を組み合わせた候補です。';
+  const [first, second, third] = selected;
+  const firstCourse = Number(first.entryCourse || first.lane);
+  const parts = [];
+  if (firstCourse === 1) parts.push(`${first.lane}号艇のイン逃げを軸`);
+  else if (firstCourse === 4) parts.push(`${first.lane}号艇のカド攻めを軸`);
+  else if (firstCourse === 2 || firstCourse === 3) parts.push(`${first.lane}号艇の差し・まくり差しを軸`);
+  else parts.push(`${first.lane}号艇の外伸びを軸`);
+
+  const secondWeapons = [];
+  if (second.classG === 'A1') secondWeapons.push('A1級');
+  if (Number(second.gearScore || 0) >= 65) secondWeapons.push('機力上位');
+  if (Number(second.exScore || 0) >= 70) secondWeapons.push('展示上位');
+  if (Number(second.stScore || 0) >= 70) secondWeapons.push('ST上位');
+  parts.push(`${second.lane}号艇を${secondWeapons.join('・') || '総合力'}で相手本線`);
+
+  const thirdWeapons = [];
+  if (Number(third.exScore || 0) >= 68) thirdWeapons.push('展示気配');
+  if (Number(third.gearScore || 0) >= 62) thirdWeapons.push('機力');
+  if (Number(third.targetScore || 0) >= 55) thirdWeapons.push('穴適性');
+  parts.push(`${third.lane}号艇は${thirdWeapons.join('・') || '連下安定度'}を評価`);
+  return `${parts.join('、')}。`;
+}
+
 function getRaceSummary(boats) {
   if (!boats || boats.length === 0) return null;
   const top = boats[0];
@@ -1269,12 +1317,28 @@ function buildLearningSummary(races) {
   const trifecta = computeTrifectaStats(completed);
   const recent = completed.slice(0, 20);
   const recentStats = computeTrifectaStats(recent);
+  const moneyRaces = completed.filter(r => Number(r.stakeYen) > 0 || Number(r.payoutYen) > 0);
+  const stake = moneyRaces.reduce((sum, r) => sum + Math.max(0, Number(r.stakeYen) || 0), 0);
+  const payout = moneyRaces.reduce((sum, r) => sum + Math.max(0, Number(r.payoutYen) || 0), 0);
+  const roi = stake > 0 ? Math.round((payout / stake) * 1000) / 10 : null;
+  const profit = payout - stake;
+  const firstPickWins = completed.filter(r => {
+    const lanes = parseResultLanes(r.result);
+    const best = Array.isArray(r.boats) ? [...r.boats].sort((a,b) => Number(b.total||0)-Number(a.total||0))[0] : null;
+    return lanes?.[0] && best && lanes[0] === best.lane;
+  }).length;
   return {
     total: completed.length,
     hitRate: trifecta.betsHitRate,
     recentHitRate: recentStats.betsHitRate,
     straightRate: trifecta.straightRate,
     boxRate: trifecta.boxRate,
+    roi,
+    profit,
+    stake,
+    payout,
+    moneyRaceCount: moneyRaces.length,
+    topPickWinRate: completed.length ? Math.round(firstPickWins / completed.length * 1000) / 10 : null,
   };
 }
 
@@ -1436,6 +1500,8 @@ setForecast(generateForecast(scored));
       savedAt: new Date().toISOString(),
       note: saveNote,
       result: '',
+      stakeYen: Array.isArray(bets) ? bets.reduce((sum, b) => sum + (Number(b.yen) || 0), 0) : 0,
+      payoutYen: 0,
       boats: boats.map(b => ({
         lane: b.lane, mark: b.mark, entryCourse: b.entryCourse,
         total: Math.round(b.total * 10) / 10,
@@ -1466,6 +1532,13 @@ setForecast(generateForecast(scored));
 
   const handleResultChange = async (id, value) => {
     const updated = races.map(r => r.id === id ? { ...r, result: value } : r);
+    setRaces(updated);
+    await saveJSON(`boatrace:races:${venue}`, updated);
+  };
+
+  const handleRaceMoneyChange = async (id, field, value) => {
+    const amount = Math.max(0, parseInt(value, 10) || 0);
+    const updated = races.map(r => r.id === id ? { ...r, [field]: amount } : r);
     setRaces(updated);
     await saveJSON(`boatrace:races:${venue}`, updated);
   };
@@ -1755,7 +1828,7 @@ setForecast(generateForecast(scored));
                     {scoreStars(getDisplayScore(b, boats))}
                   </div>
                   <div style={{ fontSize: 10, color: '#8ba3bd' }}>
-                    実力{Math.round(b.playerScore)} / 機力{Math.round(b.gearScore)} / 展示{Math.round(b.exScore)} / ST{Math.round(b.stScore)}
+                    <span style={{ color: componentColor(b.playerScore) }}>実力{Math.round(b.playerScore)}</span> / <span style={{ color: componentColor(b.gearScore) }}>機力{Math.round(b.gearScore)}</span> / <span style={{ color: componentColor(b.exScore) }}>展示{Math.round(b.exScore)}</span> / <span style={{ color: componentColor(b.stScore) }}>ST{Math.round(b.stScore)}</span>
                   </div>
                 </div>
                 <div style={{ fontSize: 18, fontWeight: 900, color: scoreColor(getDisplayScore(b, boats)) }}>
@@ -1789,7 +1862,10 @@ setForecast(generateForecast(scored));
                     全国2連{b.nat2?.toFixed?.(1) ?? '-'} / モーター2連{b.motor2?.toFixed?.(1) ?? '-'} / 展示{b.exTime ?? '-'} / 展示ST{b.exST != null ? b.exST.toFixed(2) : '-'}{b.konsetsuAvgST != null ? ` / 今節平均ST${b.konsetsuAvgST.toFixed(2)}` : ''}
                   </div>
                 </div>
-                <div style={{ fontSize: 15, fontWeight: 700, flexShrink: 0 }}>{getDisplayScore(b, boats)}</div>
+                <div style={{ textAlign: 'right', flexShrink: 0 }}>
+                  <div style={{ fontSize: 15, fontWeight: 800, color: scoreColor(getDisplayScore(b, boats)) }}>{getDisplayScore(b, boats)}</div>
+                  <div style={{ fontSize: 10, fontWeight: 800, color: getRealtimeTrend(b).color }}>{getRealtimeTrend(b).label}</div>
+                </div>
               </div>
             ))}
             </details>
@@ -1840,7 +1916,7 @@ setForecast(generateForecast(scored));
                             {bets[0].flowLabel} ／ AI指数 {bets[0].aiIndex} ／ 展開適性 {bets[0].flowScore}点
                           </div>
                           <div style={{ fontSize: 10, color: '#8ba3bd', marginTop: 3 }}>
-                            AIコメント：上位艇の総合力と展開適性を重視した最優先候補です。
+                            AIコメント：{generateBetComment(bets[0], boats)}
                           </div>
                         </div>
                         <div style={{ textAlign: 'right' }}>
@@ -1896,6 +1972,9 @@ setForecast(generateForecast(scored));
                           </div>
                           <div style={{ fontSize: 10, color: '#71869b', marginTop: 2 }}>
                             内訳：勝率 {b.hitScore}・展示 {b.exhibitScore}・ST {b.startScore}・機力 {b.motorScore}・展開 {b.flowScore}
+                          </div>
+                          <div style={{ fontSize: 10, color: '#9fb2c6', marginTop: 3, lineHeight: 1.5 }}>
+                            {generateBetComment(b, boats)}
                           </div>
 
                           {b.odds !== null && b.odds !== undefined ? (
@@ -2114,9 +2193,11 @@ setForecast(generateForecast(scored));
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8 }}>
             <div style={{ background: '#0f1a28', borderRadius: 8, padding: 9 }}><div style={{ fontSize: 10, color: '#8ba3bd' }}>結果入力済み</div><div style={{ fontSize: 18, fontWeight: 900 }}>{learningSummary.total}件</div></div>
-            <div style={{ background: '#0f1a28', borderRadius: 8, padding: 9 }}><div style={{ fontSize: 10, color: '#8ba3bd' }}>買い目的中率</div><div style={{ fontSize: 18, fontWeight: 900, color: '#52d273' }}>{learningSummary.hitRate ?? '-'}%</div></div>
-            <div style={{ background: '#0f1a28', borderRadius: 8, padding: 9 }}><div style={{ fontSize: 10, color: '#8ba3bd' }}>直近20件</div><div style={{ fontSize: 18, fontWeight: 900, color: '#7aa6e8' }}>{learningSummary.recentHitRate ?? '-'}%</div></div>
-            <div style={{ background: '#0f1a28', borderRadius: 8, padding: 9 }}><div style={{ fontSize: 10, color: '#8ba3bd' }}>印BOX的中率</div><div style={{ fontSize: 18, fontWeight: 900, color: '#e8b800' }}>{learningSummary.boxRate ?? '-'}%</div></div>
+            <div style={{ background: '#0f1a28', borderRadius: 8, padding: 9 }}><div style={{ fontSize: 10, color: '#8ba3bd' }}>買い目的中率</div><div style={{ fontSize: 18, fontWeight: 900, color: '#52d273' }}>{learningSummary.hitRate ?? '-'}{learningSummary.hitRate != null ? '%' : ''}</div></div>
+            <div style={{ background: '#0f1a28', borderRadius: 8, padding: 9 }}><div style={{ fontSize: 10, color: '#8ba3bd' }}>本命1着率</div><div style={{ fontSize: 18, fontWeight: 900, color: '#7aa6e8' }}>{learningSummary.topPickWinRate ?? '-'}{learningSummary.topPickWinRate != null ? '%' : ''}</div></div>
+            <div style={{ background: '#0f1a28', borderRadius: 8, padding: 9 }}><div style={{ fontSize: 10, color: '#8ba3bd' }}>印BOX的中率</div><div style={{ fontSize: 18, fontWeight: 900, color: '#e8b800' }}>{learningSummary.boxRate ?? '-'}{learningSummary.boxRate != null ? '%' : ''}</div></div>
+            <div style={{ background: '#0f1a28', borderRadius: 8, padding: 9 }}><div style={{ fontSize: 10, color: '#8ba3bd' }}>実回収率</div><div style={{ fontSize: 18, fontWeight: 900, color: learningSummary.roi != null && learningSummary.roi >= 100 ? '#52d273' : '#ff9b6b' }}>{learningSummary.roi ?? '-'}{learningSummary.roi != null ? '%' : ''}</div><div style={{ fontSize: 9, color: '#71869b' }}>{learningSummary.moneyRaceCount}件で集計</div></div>
+            <div style={{ background: '#0f1a28', borderRadius: 8, padding: 9 }}><div style={{ fontSize: 10, color: '#8ba3bd' }}>実収支</div><div style={{ fontSize: 18, fontWeight: 900, color: learningSummary.profit >= 0 ? '#52d273' : '#ff6b6b' }}>{learningSummary.profit >= 0 ? '+' : ''}{learningSummary.profit.toLocaleString('ja-JP')}円</div><div style={{ fontSize: 9, color: '#71869b' }}>投資{learningSummary.stake.toLocaleString('ja-JP')}円</div></div>
           </div>
         </div>
 
@@ -2142,6 +2223,17 @@ setForecast(generateForecast(scored));
               {r.note && <div style={{ fontSize: 12, color: '#8ba3bd', marginBottom: 6 }}>メモ: {r.note}</div>}
               <input placeholder="結果(例: 1-3-2)" value={r.result} onChange={e => handleResultChange(r.id, e.target.value)}
                 style={{ width: '100%', background: '#0f1a28', color: '#e8edf2', border: '1px solid #2a3d52', borderRadius: 6, padding: '6px 8px', fontSize: 12, boxSizing: 'border-box' }} />
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginTop: 6 }}>
+                <label style={{ fontSize: 10, color: '#8ba3bd' }}>投資額
+                  <input type="number" min="0" step="100" value={r.stakeYen || ''} onChange={e => handleRaceMoneyChange(r.id, 'stakeYen', e.target.value)} placeholder="例: 500"
+                    style={{ width: '100%', marginTop: 3, background: '#0f1a28', color: '#e8edf2', border: '1px solid #2a3d52', borderRadius: 6, padding: '6px 8px', fontSize: 12, boxSizing: 'border-box' }} />
+                </label>
+                <label style={{ fontSize: 10, color: '#8ba3bd' }}>払戻額
+                  <input type="number" min="0" step="100" value={r.payoutYen || ''} onChange={e => handleRaceMoneyChange(r.id, 'payoutYen', e.target.value)} placeholder="外れは0"
+                    style={{ width: '100%', marginTop: 3, background: '#0f1a28', color: '#e8edf2', border: '1px solid #2a3d52', borderRadius: 6, padding: '6px 8px', fontSize: 12, boxSizing: 'border-box' }} />
+                </label>
+              </div>
+              {(Number(r.stakeYen) > 0 || Number(r.payoutYen) > 0) && <div style={{ fontSize: 10, color: Number(r.payoutYen || 0) - Number(r.stakeYen || 0) >= 0 ? '#52d273' : '#ff6b6b', marginTop: 5, textAlign: 'right' }}>収支 {Number(r.payoutYen || 0) - Number(r.stakeYen || 0) >= 0 ? '+' : ''}{(Number(r.payoutYen || 0) - Number(r.stakeYen || 0)).toLocaleString('ja-JP')}円</div>}
             </div>
           ))}
         </div>
