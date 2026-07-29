@@ -230,7 +230,13 @@ function generateBets(boats, betType, budgetYen) {
 }
 
 function normalizeOddsValue(value) {
-  if (value === null || value === undefined || value === '') return null;
+  if (
+    value === null ||
+    value === undefined ||
+    value === ''
+  ) {
+    return null;
+  }
 
   const cleaned = String(value)
     .replace(/倍/g, '')
@@ -238,7 +244,31 @@ function normalizeOddsValue(value) {
     .trim();
 
   const number = Number(cleaned);
-  return Number.isFinite(number) && number > 0 ? number : null;
+
+  return Number.isFinite(number) && number > 0
+    ? number
+    : null;
+}
+
+function normalizeReturnRate(value) {
+  if (
+    value === null ||
+    value === undefined ||
+    value === ''
+  ) {
+    return null;
+  }
+
+  const cleaned = String(value)
+    .replace(/[％%]/g, '')
+    .replace(/,/g, '')
+    .trim();
+
+  const number = Number(cleaned);
+
+  return Number.isFinite(number)
+    ? number
+    : null;
 }
 
 function collectOddsMap(boats) {
@@ -247,21 +277,233 @@ function collectOddsMap(boats) {
   boats.forEach((boat) => {
     const source = boat?.odds;
 
-    if (!source || typeof source !== 'object') return;
+    if (
+      !source ||
+      typeof source !== 'object' ||
+      Array.isArray(source)
+    ) {
+      return;
+    }
 
-    Object.entries(source).forEach(([combo, value]) => {
-      const odds = normalizeOddsValue(value);
+    Object.entries(source).forEach(
+      ([combo, value]) => {
+        const odds = normalizeOddsValue(value);
 
-      if (odds !== null) {
-        oddsMap[String(combo).replace(/\s/g, '')] = odds;
+        if (odds !== null) {
+          const normalizedCombo = String(combo)
+            .replace(/[‐-‒–—−ー]/g, '-')
+            .replace(/\s/g, '');
+
+          oddsMap[normalizedCombo] = odds;
+        }
       }
-    });
+    );
   });
 
   return oddsMap;
 }
 
+function collectPositionReturns(boats) {
+  const source = boats.find(
+    (boat) =>
+      boat?.positionReturns &&
+      typeof boat.positionReturns === 'object'
+  )?.positionReturns;
+
+  if (!source) {
+    return {
+      first: {},
+      second: {},
+      third: {},
+    };
+  }
+
+  return {
+    first:
+      source.first &&
+      typeof source.first === 'object'
+        ? source.first
+        : {},
+
+    second:
+      source.second &&
+      typeof source.second === 'object'
+        ? source.second
+        : {},
+
+    third:
+      source.third &&
+      typeof source.third === 'object'
+        ? source.third
+        : {},
+  };
+}
+
+function calculateReturnExpectation(
+  combo,
+  positionReturns
+) {
+  const lanes = String(combo)
+    .replace(/[‐-‒–—−ー]/g, '-')
+    .split('-')
+    .map((value) => Number(value));
+
+  if (
+    lanes.length !== 3 ||
+    lanes.some((lane) => !Number.isFinite(lane))
+  ) {
+    return {
+      score: null,
+      label: 'データなし',
+      level: 'none',
+      details: null,
+    };
+  }
+
+  const [firstLane, secondLane, thirdLane] =
+    lanes;
+
+  const first = normalizeReturnRate(
+    positionReturns.first?.[String(firstLane)]
+  );
+
+  const second = normalizeReturnRate(
+    positionReturns.second?.[
+      String(secondLane)
+    ]
+  );
+
+  const third = normalizeReturnRate(
+    positionReturns.third?.[String(thirdLane)]
+  );
+
+  const values = [first, second, third].filter(
+    (value) => value !== null
+  );
+
+  if (values.length < 3) {
+    return {
+      score: null,
+      label: 'データなし',
+      level: 'none',
+      details: null,
+    };
+  }
+
+  /*
+   * 1着50%・2着30%・3着20%で評価。
+   * 1着固定回収率を最も重く扱う。
+   */
+  const score =
+    first * 0.5 +
+    second * 0.3 +
+    third * 0.2;
+
+  let label;
+  let level;
+
+  if (score >= 120) {
+    label = '高';
+    level = 'high';
+  } else if (score >= 80) {
+    label = '標準';
+    level = 'standard';
+  } else {
+    label = '低';
+    level = 'low';
+  }
+
+  return {
+    score: Math.round(score * 10) / 10,
+    label,
+    level,
+    details: {
+      first,
+      second,
+      third,
+    },
+  };
+}
+
 function addExpectedValueToBets(bets, boats) {
+  if (!Array.isArray(bets)) return [];
+
+  const oddsMap = collectOddsMap(boats);
+  const positionReturns =
+    collectPositionReturns(boats);
+
+  return bets.map((bet) => {
+    const normalizedCombo = String(bet.combo)
+      .replace(/[‐-‒–—−ー]/g, '-')
+      .replace(/\s/g, '');
+
+    const odds =
+      oddsMap[normalizedCombo] ?? null;
+
+    const probability =
+      typeof bet.prob === 'number'
+        ? bet.prob / 100
+        : null;
+
+    const expectedValue =
+      odds !== null && probability !== null
+        ? probability * odds * 100
+        : null;
+
+    const expectedProfit =
+      expectedValue !== null
+        ? Math.round(
+            bet.yen *
+              (expectedValue / 100 - 1)
+          )
+        : null;
+
+    let evLabel = 'オッズ未取得';
+
+    if (expectedValue !== null) {
+      if (expectedValue >= 130) {
+        evLabel = '強く買い候補';
+      } else if (expectedValue >= 110) {
+        evLabel = '買い候補';
+      } else if (expectedValue >= 100) {
+        evLabel = '検討候補';
+      } else {
+        evLabel = '見送り候補';
+      }
+    }
+
+    const returnExpectation =
+      calculateReturnExpectation(
+        normalizedCombo,
+        positionReturns
+      );
+
+    return {
+      ...bet,
+      odds,
+
+      expectedValue:
+        expectedValue !== null
+          ? Math.round(expectedValue)
+          : null,
+
+      expectedProfit,
+      evLabel,
+
+      returnExpectationScore:
+        returnExpectation.score,
+
+      returnExpectationLabel:
+        returnExpectation.label,
+
+      returnExpectationLevel:
+        returnExpectation.level,
+
+      returnExpectationDetails:
+        returnExpectation.details,
+    };
+  });
+}
   if (!Array.isArray(bets)) return [];
 
   const oddsMap = collectOddsMap(boats);
