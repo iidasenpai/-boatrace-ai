@@ -614,8 +614,34 @@ const VISION_PROMPT = `あなたは競艇(ボートレース)の出走表・直�
 
 boatsは必ずlane 1〜6の6艇分を含めてください。今節成績の着順は色付きの丸数字や下線付き数字として表示されていることが多いので、見えている範囲はできるだけ拾ってください。`;
 
-async function callVisionAPI(_images) {
-  throw new Error('公開版では画像解析APIは未設定です。現在は①〜③のテキスト入力を利用してください。');
+async function callVisionAPI(images) {
+  const response = await fetch(
+    'https://geminiapikey.uimaru02.workers.dev',
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        images: images.map(image => ({
+          mimeType: image.mediaType,
+          data: image.base64,
+        })),
+      }),
+    }
+  );
+
+  const result = await response.json();
+
+  if (!response.ok || !result.success) {
+    throw new Error(
+      result.details ||
+      result.error ||
+      '画像解析APIでエラーが発生しました'
+    );
+  }
+
+  return result.data;
 }
 
 function normalizeAIBoats(boats) {
