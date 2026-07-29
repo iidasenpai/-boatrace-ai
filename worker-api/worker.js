@@ -79,12 +79,13 @@ export default {
   "raceNumber": "",
   "date": "",
   "weather": {
-    "condition": "",
-    "windDirection": "",
-    "windSpeed": null,
-    "waveHeight": null
-  },
-  "boats": [
+  "condition": "",
+  "windDirection": "",
+  "windSpeed": null,
+  "waveHeight": null
+},
+"odds": {},
+"boats": [
     {
       "lane": 1,
       "name": "",
