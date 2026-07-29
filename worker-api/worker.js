@@ -109,7 +109,10 @@ export default {
       "entryCourse": null,
       "tilt": null,
       "partsReplacement": "",
-      "currentSeriesResults": [],
+      "currentSeriesResults": [
+        { "raceNo": null, "course": null, "st": null, "finish": null }
+      ],
+      "currentSeriesAverageST": null,
       "odds": {},
       "notes": []
     }
@@ -177,6 +180,12 @@ firstは1着固定、secondは2着固定、thirdは3着固定です。
 回収率の数字を勝率やオッズとして扱わないでください。
 
 boatsは1号艇から6号艇の順に整理してください。
+
+今節成績はcurrentSeriesResultsへ、各走ごとにraceNo・course・st・finishを数値で格納してください。
+着順が画像で読めない場合だけfinishをnullにしてください。STは「.12」を0.12として返してください。
+今節のSTが1走以上読めた場合は、その平均をcurrentSeriesAverageSTにも数値で返してください。
+展示タイムと展示STを混同しないでください。展示タイムは通常6.xx、展示STは通常0.xxです。
+同タイムや最下位の艇も値を省略せず、画像にある実数をそのまま返してください。
 `;
 
       const geminiResponse = await fetch(
