@@ -714,19 +714,7 @@ function normalizeAIBoats(boats) {
   });
 }
 
-    const konsetsu = seriesResults.map(item => {
-      if (typeof item === 'object' && item !== null) {
-        return {
-          ...item,
-          st: toNumber(
-            item.st ??
-            item.ST ??
-            item.startTiming ??
-            item
-
-    };
-  });
-}
+    
 
 function scoreStars(score) {
   const n = Math.max(1, Math.min(5, Math.round((score || 0) / 20)));
