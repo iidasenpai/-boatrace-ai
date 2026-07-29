@@ -776,7 +776,7 @@ export default function BoatRaceTool() {
   const [betType, setBetType] = useState('3連単');
   const [budgetYen, setBudgetYen] = useState(500);
   const [bets, setBets] = useState(null);
-  const [anaBudget, setAnaBudget] = useState(150);
+  const [anaBudget, setAnaBudget] = useState(200);
   const [anaResult, setAnaResult] = useState(null);
   const [forecast, setForecast] = useState(null);
   const [images, setImages] = useState([]);
