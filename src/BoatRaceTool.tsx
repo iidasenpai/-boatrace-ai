@@ -572,15 +572,30 @@ function rankAndAllocateBets(bets, boats, budgetYen) {
     const hitScore = clampScore((Number(bet.prob) || 0) * 5.2);
     const valueScore = getValueScore(bet);
     const flowScore = getFlowSuitability(bet.combo, boats);
-    const aiIndex = Math.round(clampScore(hitScore * 0.62 + valueScore * 0.20 + flowScore * 0.18) * 10) / 10;
-    const rankLabel = aiIndex >= 78 ? '本命' : aiIndex >= 60 ? 'バランス' : '高配当寄り';
-    const rankLevel = aiIndex >= 78 ? 'main' : aiIndex >= 60 ? 'balance' : 'longshot';
+    const rawIndex = clampScore(hitScore * 0.62 + valueScore * 0.20 + flowScore * 0.18);
+    // 表示用AI指数は70〜100中心に再スケールし、レース信頼度との見た目の乖離を抑える
+    const aiIndex = Math.round((70 + rawIndex * 0.30) * 10) / 10;
+    const rankLabel = aiIndex >= 94 ? '超本命' : aiIndex >= 88 ? '本命' : aiIndex >= 82 ? '強め' : aiIndex >= 76 ? 'バランス' : '高配当寄り';
+    const rankLevel = aiIndex >= 88 ? 'main' : aiIndex >= 76 ? 'balance' : 'longshot';
+
+    const selected = String(bet.combo).split('-').map(Number).map(lane => boats.find(b => b.lane === lane)).filter(Boolean);
+    const weighted = (key, fallback = 50) => {
+      if (!selected.length) return fallback;
+      const weights = [0.5, 0.3, 0.2];
+      return Math.round(selected.reduce((sum, boat, index) => sum + Number(boat?.[key] ?? fallback) * weights[index], 0));
+    };
+    const exhibitScore = weighted('exScore');
+    const startScore = weighted('stScore');
+    const motorScore = weighted('gearScore');
 
     return {
       ...bet,
       hitScore: Math.round(hitScore),
       valueScore,
       flowScore,
+      exhibitScore,
+      startScore,
+      motorScore,
       flowLabel: getBetFlowLabel(bet.combo, boats),
       aiIndex,
       aiStars: getStars(aiIndex),
@@ -1160,6 +1175,58 @@ function getRaceSummary(boats) {
   };
 }
 
+
+function normalizeWeather(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+
+  const pickNumber = (...values) => {
+    for (const value of values) {
+      if (value === null || value === undefined || value === '') continue;
+      const n = Number(String(value).replace(/[^0-9.+-]/g, ''));
+      if (Number.isFinite(n)) return n;
+    }
+    return null;
+  };
+
+  const normalized = {
+    condition: raw.condition ?? raw.weather ?? raw.sky ?? '',
+    windDirection: raw.windDirection ?? raw.windDir ?? raw.direction ?? '',
+    temp: pickNumber(raw.temp, raw.temperature, raw.airTemperature),
+    wind: pickNumber(raw.wind, raw.windSpeed, raw.windVelocity),
+    waterTemp: pickNumber(raw.waterTemp, raw.waterTemperature),
+    wave: pickNumber(raw.wave, raw.waveHeight),
+  };
+
+  const hasAny = Object.values(normalized).some(v => v !== null && v !== '');
+  return hasAny ? normalized : null;
+}
+
+function getRaceGrade(summary) {
+  if (!summary) return { grade: 'C', label: '見送り', color: '#ff6b6b', stars: '★★☆☆☆', danger: 'DANGER', recommendation: 30 };
+  const confidence = Number(summary.confidence || 0);
+  const chaos = Number(summary.chaosIndex || 50);
+  const recommendation = Math.max(0, Math.min(100, Math.round(confidence * 0.72 + (100 - chaos) * 0.28)));
+  if (confidence >= 92 && chaos <= 35) return { grade: 'S+', label: '鉄板級', color: '#e68cff', stars: '★★★★★', danger: 'SAFE', recommendation };
+  if (confidence >= 84 && chaos <= 48) return { grade: 'S', label: '激アツ', color: '#c77dff', stars: '★★★★★', danger: 'SAFE', recommendation };
+  if (confidence >= 72 && chaos <= 65) return { grade: 'A', label: '買い', color: '#52d273', stars: '★★★★☆', danger: chaos <= 45 ? 'SAFE' : 'NORMAL', recommendation };
+  if (confidence >= 58) return { grade: 'B', label: '様子見', color: '#e8b800', stars: '★★★☆☆', danger: chaos >= 75 ? 'CHAOS' : 'DANGER', recommendation };
+  return { grade: 'C', label: '見送り', color: '#ff6b6b', stars: '★★☆☆☆', danger: chaos >= 75 ? 'CHAOS' : 'DANGER', recommendation };
+}
+
+function buildLearningSummary(races) {
+  const completed = (Array.isArray(races) ? races : []).filter(r => parseResultLanes(r.result)?.length >= 3);
+  const trifecta = computeTrifectaStats(completed);
+  const recent = completed.slice(0, 20);
+  const recentStats = computeTrifectaStats(recent);
+  return {
+    total: completed.length,
+    hitRate: trifecta.betsHitRate,
+    recentHitRate: recentStats.betsHitRate,
+    straightRate: trifecta.straightRate,
+    boxRate: trifecta.boxRate,
+  };
+}
+
 // ---------- UI ----------
 
 export default function BoatRaceTool() {
@@ -1210,9 +1277,10 @@ export default function BoatRaceTool() {
       return;
     }
     const merged = mergeBoats(rl, bi, sd);
-    const scored = computeScores(merged, venue, sd ? sd.weather : null);
+    const normalizedWeather = normalizeWeather(sd ? sd.weather : null);
+    const scored = computeScores(merged, venue, normalizedWeather);
     setBoats(scored);
-    setWeather(sd ? sd.weather : null);
+    setWeather(normalizedWeather);
     setBets(null);
     setAnaResult(null);
     setForecast(generateForecast(scored));
@@ -1266,9 +1334,10 @@ export default function BoatRaceTool() {
   result.odds,
   result.positionReturns
 );
-      const scored = computeScores(normalized, venue, result.weather || null);
+      const normalizedWeather = normalizeWeather(result.weather);
+      const scored = computeScores(normalized, venue, normalizedWeather);
       setBoats(scored);
-setWeather(result.weather || null);
+      setWeather(normalizedWeather);
 
 const autoBets = rankAndAllocateBets(
   addExpectedValueToBets(
@@ -1365,6 +1434,8 @@ setForecast(generateForecast(scored));
   };
 
   const raceSummary = getRaceSummary(boats);
+  const raceGrade = getRaceGrade(raceSummary);
+  const learningSummary = buildLearningSummary(races);
 
   return (
     <div style={{ minHeight: '100vh', background: '#0b1420', color: '#e8edf2', fontFamily: 'system-ui, -apple-system, "Hiragino Sans", sans-serif' }}>
@@ -1459,8 +1530,10 @@ setForecast(generateForecast(scored));
         {status && <div style={{ fontSize: 12, color: '#8ba3bd', marginBottom: 14 }}>{status}</div>}
 
         {weather && (
-          <div style={{ fontSize: 12, color: '#8ba3bd', marginBottom: 14 }}>
-            気温{weather.temp}℃ / 風速{weather.wind}m / 水温{weather.waterTemp}℃ / 波高{weather.wave}cm
+          <div style={{ fontSize: 12, color: '#8ba3bd', marginBottom: 14, lineHeight: 1.6 }}>
+            {weather.condition && <span>{weather.condition} ／ </span>}
+            気温{weather.temp ?? '-'}℃ ／ 風速{weather.wind ?? '-'}m
+            {weather.windDirection ? `（${weather.windDirection}）` : ''} ／ 水温{weather.waterTemp ?? '-'}℃ ／ 波高{weather.wave ?? '-'}cm
           </div>
         )}
 
@@ -1509,6 +1582,29 @@ setForecast(generateForecast(scored));
               marginBottom: 12,
               boxShadow: '0 8px 22px rgba(0,0,0,0.18)',
             }}>
+              <div style={{
+                display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                background: '#0f1a28', border: `1px solid ${raceGrade.color}`, borderRadius: 9,
+                padding: '9px 11px', marginBottom: 11,
+              }}>
+                <div>
+                  <div style={{ fontSize: 10, color: '#8ba3bd' }}>🔥 AI総評</div>
+                  <div style={{ fontSize: 13, fontWeight: 900, color: raceGrade.color }}>{raceGrade.stars} {raceGrade.label}</div>
+                </div>
+                <div style={{ fontSize: 28, fontWeight: 950, color: raceGrade.color }}>{raceGrade.grade}<span style={{ fontSize: 12, marginLeft: 3 }}>ランク</span></div>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 11 }}>
+                <div style={{ background: '#0f1a28', borderRadius: 8, padding: 9 }}>
+                  <div style={{ fontSize: 10, color: '#8ba3bd' }}>⚠ レース危険度</div>
+                  <div style={{ fontSize: 15, fontWeight: 900, color: raceGrade.danger === 'SAFE' ? '#52d273' : raceGrade.danger === 'NORMAL' ? '#7aa6e8' : raceGrade.danger === 'CHAOS' ? '#ff6b6b' : '#ff9b6b' }}>{raceGrade.danger}</div>
+                </div>
+                <div style={{ background: '#0f1a28', borderRadius: 8, padding: 9 }}>
+                  <div style={{ fontSize: 10, color: '#8ba3bd' }}>📊 推奨度</div>
+                  <div style={{ fontSize: 15, fontWeight: 900, color: raceGrade.color }}>{raceGrade.recommendation}%</div>
+                </div>
+              </div>
+
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, marginBottom: 12 }}>
                 <div>
                   <div style={{ fontSize: 11, color: '#8ba3bd', marginBottom: 2 }}>🤖 AI解析結果</div>
@@ -1666,7 +1762,7 @@ setForecast(generateForecast(scored));
                   style={{ width: 100, background: '#131f2e', color: '#e8edf2', border: '1px solid #2a3d52', borderRadius: 6, padding: '8px 10px', fontSize: 13 }} />
                 <button onClick={handleGenerateBets}
                   style={{ background: '#e8b800', color: '#111', border: 'none', borderRadius: 6, padding: '8px 16px', fontWeight: 700, fontSize: 13, cursor: 'pointer' }}>
-                  AI資金配分
+                  AI買い目生成
                 </button>
               </div>
 
@@ -1682,12 +1778,15 @@ setForecast(generateForecast(scored));
                         marginBottom: 10,
                       }}
                     >
-                      <div style={{ color: '#7aff9b', fontSize: 11, fontWeight: 900 }}>★★★★★ AI最優先</div>
+                      <div style={{ color: '#7aff9b', fontSize: 11, fontWeight: 900 }}>{bets[0].aiStars} AI最優先 ／ {bets[0].rankLabel}</div>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'end', gap: 12, marginTop: 4 }}>
                         <div>
                           <div style={{ fontSize: 22, fontWeight: 900 }}>{bets[0].combo}</div>
                           <div style={{ fontSize: 11, color: '#b9d9c8', marginTop: 2 }}>
                             {bets[0].flowLabel} ／ AI指数 {bets[0].aiIndex} ／ 展開適性 {bets[0].flowScore}点
+                          </div>
+                          <div style={{ fontSize: 10, color: '#8ba3bd', marginTop: 3 }}>
+                            AIコメント：上位艇の総合力と展開適性を重視した最優先候補です。
                           </div>
                         </div>
                         <div style={{ textAlign: 'right' }}>
@@ -1698,7 +1797,7 @@ setForecast(generateForecast(scored));
                     </div>
                   )}
 
-                  {bets.map((b, i) => {
+                  {bets.slice(1).map((b, i) => {
                     const rankColor =
                       b.rankLevel === 'main'
                         ? '#38d66b'
@@ -1721,7 +1820,7 @@ setForecast(generateForecast(scored));
                           gap: 10,
                           alignItems: 'center',
                           background: '#131f2e',
-                          border: i === 0 ? '1px solid #2f9b5b' : '1px solid transparent',
+                          border: '1px solid transparent',
                           borderRadius: 8,
                           padding: '12px',
                           marginBottom: 8,
@@ -1742,7 +1841,7 @@ setForecast(generateForecast(scored));
                             目安確率 {b.prob ?? '-'}% ／ 展開適性 {b.flowScore}点
                           </div>
                           <div style={{ fontSize: 10, color: '#71869b', marginTop: 2 }}>
-                            内訳：勝率 {b.hitScore}・妙味 {b.valueScore}・展開 {b.flowScore}
+                            内訳：勝率 {b.hitScore}・展示 {b.exhibitScore}・ST {b.startScore}・機力 {b.motorScore}・展開 {b.flowScore}
                           </div>
 
                           {b.odds !== null && b.odds !== undefined ? (
@@ -1818,6 +1917,15 @@ setForecast(generateForecast(scored));
                       background: LANE_COLORS[anaResult.anaBoat.lane].bg, color: LANE_COLORS[anaResult.anaBoat.lane].text, fontWeight: 700, fontSize: 12,
                     }}>{anaResult.anaBoat.lane}</span>
                     <span>号艇(印{anaResult.anaBoat.mark} / 順位{anaResult.anaBoat.rank}位 だが機力スコア{Math.round(anaResult.anaBoat.gearScore)})</span>
+                  </div>
+                  <div style={{
+                    display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 7,
+                    background: '#101c2a', border: '1px solid #1857b0', borderRadius: 8,
+                    padding: 9, marginBottom: 8, fontSize: 11,
+                  }}>
+                    <div><div style={{ color: '#8ba3bd' }}>穴期待</div><div style={{ color: '#7aa6e8', fontWeight: 900 }}>{getStars(Math.min(100, 45 + Number(anaResult.anaBoat.gearScore || 0) * 0.7))}</div></div>
+                    <div><div style={{ color: '#8ba3bd' }}>妙味</div><div style={{ color: '#ffd54a', fontWeight: 900 }}>{anaResult.anaBoat.rank >= 5 ? '高' : '標準'}</div></div>
+                    <div><div style={{ color: '#8ba3bd' }}>推奨</div><div style={{ color: '#e8edf2', fontWeight: 900 }}>{anaResult.bets[0]?.yen ?? 100}円〜</div></div>
                   </div>
                   {anaResult.bets.map((b, i) => (
                     <div key={i} style={{
@@ -1945,6 +2053,19 @@ setForecast(generateForecast(scored));
           )}
         </div>
 
+        <div style={{ marginTop: 22, background: '#111d2b', border: '1px solid #2a3d52', borderRadius: 10, padding: 14 }}>
+          <div style={{ fontSize: 14, fontWeight: 900, color: '#e8b800', marginBottom: 8 }}>🧠 AI学習ログ</div>
+          <div style={{ fontSize: 11, color: '#8ba3bd', lineHeight: 1.6, marginBottom: 10 }}>
+            保存レースに結果を入力すると、的中傾向を端末内に蓄積して検証できます。現時点では自動で予想係数を書き換えず、学習データとして安全に可視化します。
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8 }}>
+            <div style={{ background: '#0f1a28', borderRadius: 8, padding: 9 }}><div style={{ fontSize: 10, color: '#8ba3bd' }}>結果入力済み</div><div style={{ fontSize: 18, fontWeight: 900 }}>{learningSummary.total}件</div></div>
+            <div style={{ background: '#0f1a28', borderRadius: 8, padding: 9 }}><div style={{ fontSize: 10, color: '#8ba3bd' }}>買い目的中率</div><div style={{ fontSize: 18, fontWeight: 900, color: '#52d273' }}>{learningSummary.hitRate ?? '-'}%</div></div>
+            <div style={{ background: '#0f1a28', borderRadius: 8, padding: 9 }}><div style={{ fontSize: 10, color: '#8ba3bd' }}>直近20件</div><div style={{ fontSize: 18, fontWeight: 900, color: '#7aa6e8' }}>{learningSummary.recentHitRate ?? '-'}%</div></div>
+            <div style={{ background: '#0f1a28', borderRadius: 8, padding: 9 }}><div style={{ fontSize: 10, color: '#8ba3bd' }}>印BOX的中率</div><div style={{ fontSize: 18, fontWeight: 900, color: '#e8b800' }}>{learningSummary.boxRate ?? '-'}%</div></div>
+          </div>
+        </div>
+
         {/* Race history */}
         <div style={{ marginTop: 24 }}>
           <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8 }}>{venue} 保存済みレース ({races.length}件)</div>
@@ -1975,5 +2096,4 @@ setForecast(generateForecast(scored));
     </div>
   );
 }
-
 
