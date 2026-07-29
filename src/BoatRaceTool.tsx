@@ -718,7 +718,7 @@ async function callVisionAPI(images) {
   return result.data;
 }
 
-function normalizeAIBoats(boats) {
+function normalizeAIBoats(boats, raceOdds = {}) {
   const lanes = [1, 2, 3, 4, 5, 6];
 
   return lanes.map((lane) => {
@@ -777,6 +777,17 @@ function normalizeAIBoats(boats) {
 
       konsetsu,
       konsetsuAvgST,
+
+      odds:
+  raceOdds &&
+  typeof raceOdds === 'object' &&
+  !Array.isArray(raceOdds)
+    ? raceOdds
+    : b.odds &&
+        typeof b.odds === 'object' &&
+        !Array.isArray(b.odds)
+      ? b.odds
+      : {},
 
       odds:
   b.odds && typeof b.odds === 'object'
