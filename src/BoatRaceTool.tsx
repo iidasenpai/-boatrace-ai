@@ -229,6 +229,80 @@ function generateBets(boats, betType, budgetYen) {
   return result;
 }
 
+function normalizeOddsValue(value) {
+  if (value === null || value === undefined || value === '') return null;
+
+  const cleaned = String(value)
+    .replace(/倍/g, '')
+    .replace(/,/g, '')
+    .trim();
+
+  const number = Number(cleaned);
+  return Number.isFinite(number) && number > 0 ? number : null;
+}
+
+function collectOddsMap(boats) {
+  const oddsMap = {};
+
+  boats.forEach((boat) => {
+    const source = boat?.odds;
+
+    if (!source || typeof source !== 'object') return;
+
+    Object.entries(source).forEach(([combo, value]) => {
+      const odds = normalizeOddsValue(value);
+
+      if (odds !== null) {
+        oddsMap[String(combo).replace(/\s/g, '')] = odds;
+      }
+    });
+  });
+
+  return oddsMap;
+}
+
+function addExpectedValueToBets(bets, boats) {
+  if (!Array.isArray(bets)) return [];
+
+  const oddsMap = collectOddsMap(boats);
+
+  return bets.map((bet) => {
+    const odds = oddsMap[bet.combo] ?? null;
+    const probability =
+      typeof bet.prob === 'number' ? bet.prob / 100 : null;
+
+    const expectedValue =
+      odds !== null && probability !== null
+        ? probability * odds * 100
+        : null;
+
+    const expectedProfit =
+      expectedValue !== null
+        ? Math.round(bet.yen * (expectedValue / 100 - 1))
+        : null;
+
+    let evLabel = 'オッズ未取得';
+
+    if (expectedValue !== null) {
+      if (expectedValue >= 130) evLabel = '強く買い候補';
+      else if (expectedValue >= 110) evLabel = '買い候補';
+      else if (expectedValue >= 100) evLabel = '検討候補';
+      else evLabel = '見送り候補';
+    }
+
+    return {
+      ...bet,
+      odds,
+      expectedValue:
+        expectedValue !== null
+          ? Math.round(expectedValue)
+          : null,
+      expectedProfit,
+      evLabel,
+    };
+  });
+}
+
 function findAnaCandidate(boats) {
   const outer = boats.filter(b => b.rank >= 4);
   if (outer.length === 0) return null;
