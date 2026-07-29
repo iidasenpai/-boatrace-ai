@@ -1163,7 +1163,8 @@ export default function BoatRaceTool() {
       const result = await callVisionAPI(images);
       const normalized = normalizeAIBoats(
   result.boats,
-  result.odds
+  result.odds,
+  result.positionReturns
 );
       const scored = computeScores(normalized, venue, result.weather || null);
       setBoats(scored);
@@ -1683,7 +1684,8 @@ setForecast(generateForecast(scored));
 >
   合計 {bets.reduce((a, c) => a + c.yen, 0)}円
 </div>
-
+                </div>
+              )}
 
             {/* Ana (longshot) bets */}
             <div style={{ marginTop: 20, borderTop: '1px solid #1c2b3d', paddingTop: 14 }}>
@@ -1730,6 +1732,7 @@ setForecast(generateForecast(scored));
               )}
             </div>
           </div>
+        </div>
         )}
 
         {/* Venue memo */}
