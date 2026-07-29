@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { computeScores } from './scoring';
 
 const VENUES = [
   '桐生','戸田','江戸川','平和島','多摩川','浜名湖','蒲郡','常滑',
@@ -155,124 +156,7 @@ function mergeBoats(racelist, beforeInfo, startDisp) {
 
 // ---------- Scoring ----------
 
-function norm(v, arr, invert = false) {
-  const clean = arr.filter(x => x != null && !isNaN(x));
-  if (v == null || isNaN(v) || clean.length === 0) return 50;
-  const min = Math.min(...clean), max = Math.max(...clean);
-  if (max === min) return 50;
-  const s = ((v - min) / (max - min)) * 100;
-  return invert ? 100 - s : s;
-}
 
-const CLASS_BASE = { 'A1': 100, 'A2': 66, 'B1': 33, 'B2': 10 };
-
-function computeScores(boats, weather) {
-  const nat2Arr = boats.map(b => b.nat2);
-  const loc2Arr = boats.map(b => b.loc2);
-  const motor2Arr = boats.map(b => b.motor2);
-  const boat2Arr = boats.map(b => b.boat2);
-  const exTimeArr = boats.map(b => b.exTime);
-  // 展示ST(スタート展示の実測タイミング)。展示タイム(直線速度)とは別物で、
-  // 逃げ・チルト評価と関連が深いのに今まで加点対象になっていなかったため軸として追加。
-  const exSTArr = boats.map(b => b.exST);
-  // 今節成績: テキスト貼り付けでは着順が取れないため平均ST(スタートの安定感)のみの軽い補正だったが、
-  // 画像解析経由で着順(finish)が取れる場合は、そちらを優先してより意味のある補正に切り替える。
-  const konsetsuSTArr = boats.map(b => b.konsetsuAvgST);
-  const konsetsuFinishArr = boats.map(b => {
-    const finishes = (b.konsetsu || []).filter(e => e.finish != null).map(e => e.finish);
-    return finishes.length ? finishes.reduce((a, c) => a + c, 0) / finishes.length : null;
-  });
-
-  // 大荒れ想定: field-wide F count, non-F boats get a clean-start bonus
-  const fCount = boats.filter(b => b.exhibitF).length;
-  const isChaosRace = fCount >= 4;
-
-  // 外枠エース: sole A1 racer sitting in an outside lane (4-6) against a weaker field
-  const a1Boats = boats.filter(b => b.classG === 'A1');
-
-  // 荒天判定: 風速5m以上 or 波高3cm以上 → 1コース優位が効きにくい
-  const windVal = weather ? parseFloat(weather.wind) : 0;
-  const waveVal = weather ? parseFloat(weather.wave) : 0;
-  const isRoughWater = windVal >= 5 || waveVal >= 3;
-
-  const courseW = isRoughWater ? 0.18 : 0.30;
-  const playerW = isRoughWater ? 0.28 : 0.22;
-  const gearW = isRoughWater ? 0.24 : 0.20;
-  // 展示タイム(直線速度)と展示ST(実測スタートタイミング)で重みを分け合う。
-  // 元は展示タイムのみに0.15を割り当てていたが、STの方が逃げ足の信頼度に直結するため半分ずつに分割。
-  const exW = 0.08;
-  const stW = 0.07;
-  const classW = isRoughWater ? 0.15 : 0.15;
-
-  // 先に全艇のgearScoreを算出しておき、外枠機力エース判定に使う
-  // (courseWの重みでgearが良い外枠艇が過小評価される事例が実戦で複数確認されたための追加軸)
-  const gearScoreArr = boats.map(b => norm(b.motor2, motor2Arr) * 0.6 + norm(b.boat2, boat2Arr) * 0.4);
-  const sortedGear = [...gearScoreArr].sort((a, b) => b - a);
-  const topGear = sortedGear[0];
-  const secondGear = sortedGear[1] ?? 0;
-
-  const scored = boats.map((b, i) => {
-    const playerScore = norm(b.nat2, nat2Arr) * 0.5 + norm(b.loc2, loc2Arr) * 0.5;
-    const gearScore = gearScoreArr[i];
-    const exScore = norm(b.exTime, exTimeArr, true);
-    const stScore = norm(b.exST, exSTArr, true);
-    const courseScore = (COURSE_BASE[b.entryCourse] || 0.03) * 100;
-    const classScore = CLASS_BASE[b.classG] || 30;
-
-    let fPenalty = 0;
-    if (b.exhibitF) {
-      fPenalty = b.entryCourse === 1 ? 5 : 15;
-      if (gearScore >= 65) fPenalty *= 0.5;
-      // Fが複数艇いる日はF単体の予測力が下がるため、段階的に緩和
-      fPenalty *= Math.max(0.4, 1 - fCount / 10);
-    }
-
-    let cleanStartBonus = 0;
-    if (isChaosRace && !b.exhibitF) cleanStartBonus = 12;
-
-    let outerAceBonus = 0;
-    const isOuterAce = b.classG === 'A1' && b.entryCourse >= 4 && a1Boats.length === 1;
-    if (isOuterAce) outerAceBonus = 8;
-
-    // 外枠機力エース: 4-6コースの艇が全艇中トップの機力(モーター/ボート)を持ち、
-    // 2番手と明確な差(8pt以上)がある場合、まくり・まくり差しの温床としてボーナス
-    // (courseW偏重で機力突出艇が沈む実戦例が複数あったための補正軸)
-    let outerGearBonus = 0;
-    const isOuterGearAce = b.entryCourse >= 4 && gearScore === topGear && gearScore >= 60 && (topGear - secondGear) >= 8;
-    if (isOuterGearAce) outerGearBonus = 7;
-
-    // チルト×進入コースの相性: 1コース×出足型(下向き)、外枠×伸び型(上向き)を評価
-    let tiltBonus = 0;
-    if (b.tilt != null) {
-      if (b.entryCourse === 1 && b.tilt < 0) tiltBonus = 6;
-      else if (b.entryCourse >= 4 && b.tilt > 0) tiltBonus = 6;
-    }
-
-    // 部品交換あり: 調整が間に合っていない可能性があり不確実要素として減点(軽め)
-    const partsPenalty = b.partsExchanged ? 2 : 0;
-
-    // 今節成績の補正: 着順(finish)が取れていれば平均着順を最大±8点で反映(信頼度が高い実データのため)。
-    // 着順が無い(テキスト貼り付け由来)場合のみ、平均STを最大±3点の弱い代替補正として使う。
-    const avgFinish = konsetsuFinishArr[i];
-    let konsetsuScore = null;
-    let konsetsuBonus = 0;
-    if (avgFinish != null) {
-      konsetsuScore = norm(avgFinish, konsetsuFinishArr, true);
-      konsetsuBonus = (konsetsuScore - 50) * 0.16;
-    } else if (b.konsetsuAvgST != null) {
-      konsetsuScore = norm(b.konsetsuAvgST, konsetsuSTArr, true);
-      konsetsuBonus = (konsetsuScore - 50) * 0.06;
-    }
-
-    const total = playerScore * playerW + gearScore * gearW + courseScore * courseW + exScore * exW + stScore * stW + classScore * classW
-      - fPenalty + cleanStartBonus + outerAceBonus + outerGearBonus + tiltBonus - partsPenalty + konsetsuBonus;
-    return { ...b, playerScore, gearScore, exScore, stScore, courseScore, classScore, fPenalty, cleanStartBonus, outerAceBonus, outerGearBonus, isOuterGearAce, tiltBonus, partsPenalty, konsetsuScore, konsetsuBonus, konsetsuAvgFinish: avgFinish, total, isChaosRace, isOuterAce, isRoughWater };
-  });
-
-  scored.sort((a, b) => b.total - a.total);
-  const marks = ['◎', '○', '▲', '△', '△', '△'];
-  return scored.map((b, i) => ({ ...b, mark: marks[i], rank: i + 1 }));
-}
 
 // ---------- Bet recommendation (Plackett-Luce) ----------
 
