@@ -929,10 +929,13 @@ export default function BoatRaceTool() {
       setBoats(scored);
 setWeather(result.weather || null);
 
-const autoBets = generateBets(
-  scored,
-  betType,
-  budgetYen
+const autoBets = addExpectedValueToBets(
+  generateBets(
+    scored,
+    betType,
+    budgetYen
+  ),
+  scored
 );
 
 const autoAnaResult = generateAnaBets(
