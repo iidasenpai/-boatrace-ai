@@ -1,16 +1,19 @@
 const ALLOWED_ORIGIN = "https://iidasenpai.github.io";
 
-const GEMINI_MODELS = [
-  "gemini-3.6-flash",
-  "gemini-2.5-flash",
-  "gemini-2.5-flash-lite",
+const GEMINI_ATTEMPT_PLAN = [
+  { model: "gemini-2.5-flash", waitBeforeMs: 0 },
+  { model: "gemini-2.5-flash", waitBeforeMs: 2500 },
+  { model: "gemini-2.5-flash-lite", waitBeforeMs: 4000 },
 ];
-const MAX_ATTEMPTS_PER_MODEL = 1;
-const GEMINI_TIMEOUT_MS = 40000;
+const GEMINI_TIMEOUT_MS = 55000;
 const RETRYABLE_STATUS = new Set([408, 409, 429, 500, 502, 503, 504]);
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function jitter(ms) {
+  return ms + Math.floor(Math.random() * 1200);
 }
 
 function isDemandError(status, message = "") {
@@ -36,51 +39,50 @@ function extractJsonText(text) {
 async function callGeminiWithRetry(env, payload) {
   let lastStatus = 502;
   let lastMessage = "AIサーバーから応答を受け取れませんでした。";
-  let totalAttempts = 0;
   const history = [];
 
-  for (const model of GEMINI_MODELS) {
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS_PER_MODEL; attempt += 1) {
-      totalAttempts += 1;
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS);
-      try {
-        const response = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "x-goog-api-key": env.GEMINI_API_KEY,
-            },
-            body: JSON.stringify(payload),
-            signal: controller.signal,
-          }
-        );
+  for (let index = 0; index < GEMINI_ATTEMPT_PLAN.length; index += 1) {
+    const { model, waitBeforeMs } = GEMINI_ATTEMPT_PLAN[index];
+    if (waitBeforeMs > 0) await sleep(jitter(waitBeforeMs));
 
-        let result = {};
-        try { result = await response.json(); } catch { result = {}; }
-        if (response.ok) {
-          return { response, result, attempts: totalAttempts, model, history };
+    const attempt = index + 1;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS);
+    try {
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-goog-api-key": env.GEMINI_API_KEY,
+          },
+          body: JSON.stringify(payload),
+          signal: controller.signal,
         }
+      );
 
-        lastStatus = response.status;
-        lastMessage = result?.error?.message || `Gemini APIエラー (${response.status})`;
-        history.push({ model, attempt, status: response.status });
-        const retryable = RETRYABLE_STATUS.has(response.status) ||
-          response.status === 404 || isDemandError(response.status, lastMessage);
-        if (!retryable) break;
-        if (attempt < MAX_ATTEMPTS_PER_MODEL) await sleep(1200 * attempt);
-      } catch (error) {
-        lastStatus = error?.name === "AbortError" ? 504 : 502;
-        lastMessage = error?.name === "AbortError"
-          ? "AIサーバーの応答がタイムアウトしました。"
-          : (error instanceof Error ? error.message : String(error));
-        history.push({ model, attempt, status: lastStatus });
-        if (attempt < MAX_ATTEMPTS_PER_MODEL) await sleep(1200 * attempt);
-      } finally {
-        clearTimeout(timeoutId);
+      let result = {};
+      try { result = await response.json(); } catch { result = {}; }
+      if (response.ok) {
+        return { response, result, attempts: attempt, model, history };
       }
+
+      lastStatus = response.status;
+      lastMessage = result?.error?.message || `Gemini APIエラー (${response.status})`;
+      history.push({ model, attempt, status: response.status });
+
+      const retryable = RETRYABLE_STATUS.has(response.status) ||
+        response.status === 404 || isDemandError(response.status, lastMessage);
+      if (!retryable) break;
+    } catch (error) {
+      lastStatus = error?.name === "AbortError" ? 504 : 502;
+      lastMessage = error?.name === "AbortError"
+        ? "AIサーバーの応答がタイムアウトしました。"
+        : (error instanceof Error ? error.message : String(error));
+      history.push({ model, attempt, status: lastStatus });
+    } finally {
+      clearTimeout(timeoutId);
     }
   }
 
@@ -89,7 +91,7 @@ async function callGeminiWithRetry(env, payload) {
   err.status = demand ? 503 : lastStatus;
   err.retryable = demand || RETRYABLE_STATUS.has(lastStatus) || lastStatus === 404;
   err.userMessage = demand
-    ? "AIサーバーが混雑しています。画像は保持されています。自動再試行後も接続できませんでした。"
+    ? "AIサーバーが混雑しています。画像は保持されていますので、少し待ってから再試行してください。"
     : "画像解析に失敗しました。画像は保持されていますので再試行できます。";
   err.history = history;
   throw err;
