@@ -50,6 +50,15 @@ export type BoatInput = {
   [key: string]: unknown;
 };
 
+export type AdaptiveWeights = {
+  player?: number;
+  gear?: number;
+  course?: number;
+  exhibition?: number;
+  start?: number;
+  class?: number;
+};
+
 export type ScoredBoat = BoatInput & {
   playerScore: number;
   gearScore: number;
@@ -337,6 +346,7 @@ export function computeScores(
   boats: BoatInput[],
   venueOrWeather?: string | WeatherInfo | null,
   maybeWeather?: WeatherInfo | null,
+  adaptiveWeights?: AdaptiveWeights | null,
 ): ScoredBoat[] {
   // 旧呼び出し computeScores(boats, weather) と
   // 新呼び出し computeScores(boats, venue, weather) の両方に対応。
@@ -477,13 +487,35 @@ export function computeScores(
       ]);
     }
 
-    const courseWeight = isRoughWater ? 0.15 : 0.24;
-    const playerWeight = isRoughWater ? 0.27 : 0.23;
-    const gearWeight = isRoughWater ? 0.25 : 0.22;
-    const exWeight = 0.11;
-    const stWeight = isRoughWater ? 0.12 : 0.10;
-    const classWeight = 0.10;
-    const weatherWeight = isRoughWater ? 0.05 : 0;
+    // 保存済み結果が十分にある場合だけ、実測から得た穏やかな補正(0.85〜1.15)を適用する。
+    // 基本ロジックを壊さないよう、補正後も全ウェイトを再正規化する。
+    const baseWeights = {
+      course: isRoughWater ? 0.15 : 0.24,
+      player: isRoughWater ? 0.27 : 0.23,
+      gear: isRoughWater ? 0.25 : 0.22,
+      exhibition: 0.11,
+      start: isRoughWater ? 0.12 : 0.10,
+      class: 0.10,
+      weather: isRoughWater ? 0.05 : 0,
+    };
+    const adjusted = {
+      course: baseWeights.course * (adaptiveWeights?.course ?? 1),
+      player: baseWeights.player * (adaptiveWeights?.player ?? 1),
+      gear: baseWeights.gear * (adaptiveWeights?.gear ?? 1),
+      exhibition: baseWeights.exhibition * (adaptiveWeights?.exhibition ?? 1),
+      start: baseWeights.start * (adaptiveWeights?.start ?? 1),
+      class: baseWeights.class * (adaptiveWeights?.class ?? 1),
+      weather: baseWeights.weather,
+    };
+    const adjustedSum = Object.values(adjusted).reduce((a, b) => a + b, 0) || 1;
+    const scale = Object.values(baseWeights).reduce((a, b) => a + b, 0) / adjustedSum;
+    const courseWeight = adjusted.course * scale;
+    const playerWeight = adjusted.player * scale;
+    const gearWeight = adjusted.gear * scale;
+    const exWeight = adjusted.exhibition * scale;
+    const stWeight = adjusted.start * scale;
+    const classWeight = adjusted.class * scale;
+    const weatherWeight = adjusted.weather * scale;
 
     const rawTotal =
       playerScore * playerWeight +

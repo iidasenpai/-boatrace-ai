@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { computeScores } from './scoring';
 
 const VENUES = [
@@ -925,6 +925,45 @@ function computeTrifectaStats(races) {
 // (1) 会場ごとの3連単的中率と、(2) 会場ごとの実測コース別1着率、の両方を出す。
 // (2)は印の良し悪しとは無関係に「その水面で実際何コースが強いか」を直接見られるので、
 // COURSE_BASE(全国平均想定の固定値)が会場に合っているかどうかの一番直接的な検証になる。
+
+function buildAdaptiveWeightProfile(races) {
+  const completed = (Array.isArray(races) ? races : []).filter(r => {
+    const lanes = parseResultLanes(r.result);
+    return lanes?.length >= 1 && Array.isArray(r.boats) && r.boats.length >= 4;
+  });
+  const featureMap = {
+    player: 'playerScore',
+    gear: 'gearScore',
+    course: 'courseScore',
+    exhibition: 'exScore',
+    start: 'stScore',
+    class: 'classScore',
+  };
+  const neutral = Object.fromEntries(Object.keys(featureMap).map(k => [k, 1]));
+  if (completed.length < 20) return { sampleSize: completed.length, active: false, weights: neutral, signals: {} };
+
+  const uplifts = {};
+  for (const [name, field] of Object.entries(featureMap)) {
+    const diffs = [];
+    completed.forEach(r => {
+      const winnerLane = parseResultLanes(r.result)?.[0];
+      const winner = r.boats.find(b => Number(b.lane) === Number(winnerLane));
+      const values = r.boats.map(b => Number(b[field])).filter(Number.isFinite);
+      const winnerValue = Number(winner?.[field]);
+      if (!Number.isFinite(winnerValue) || values.length < 4) return;
+      const mean = values.reduce((a,b) => a+b, 0) / values.length;
+      diffs.push(winnerValue - mean);
+    });
+    uplifts[name] = diffs.length ? diffs.reduce((a,b) => a+b,0) / diffs.length : 0;
+  }
+  const absMax = Math.max(8, ...Object.values(uplifts).map(v => Math.abs(Number(v) || 0)));
+  const weights = {};
+  Object.entries(uplifts).forEach(([name, uplift]) => {
+    weights[name] = Math.max(0.85, Math.min(1.15, 1 + (Number(uplift) / absMax) * 0.15));
+  });
+  return { sampleSize: completed.length, active: true, weights, signals: uplifts };
+}
+
 function computeVenueStats(races) {
   const byVenue = {};
   races.forEach(r => {
@@ -1417,6 +1456,7 @@ export default function BoatRaceTool() {
   const [imageCanRetry, setImageCanRetry] = useState(false);
   const [statsResult, setStatsResult] = useState(null);
   const [statsLoading, setStatsLoading] = useState(false);
+  const adaptiveProfile = useMemo(() => buildAdaptiveWeightProfile(races), [races]);
 
   const loadVenueData = useCallback(async (v) => {
     setLoading(true);
@@ -1441,7 +1481,7 @@ export default function BoatRaceTool() {
     }
     const merged = mergeBoats(rl, bi, sd);
     const normalizedWeather = normalizeWeather(sd ? sd.weather : null);
-    const scored = computeScores(merged, venue, normalizedWeather);
+    const scored = computeScores(merged, venue, normalizedWeather, adaptiveProfile.weights);
     setBoats(scored);
     setWeather(normalizedWeather);
     setBets(null);
@@ -1496,13 +1536,56 @@ export default function BoatRaceTool() {
     setImageCanRetry(false);
     try {
       const result = await callVisionAPI(images);
+
+      // 結果画面が含まれていれば、保存済みレースへ自動反映する。
+      const detectedResult = result?.raceResult;
+      if (detectedResult?.detected && detectedResult?.trifecta) {
+        const resultVenue = detectedResult.venue || venue;
+        const resultRaceNo = String(detectedResult.raceNumber || raceNo || '').replace(/R/gi, '');
+        const resultDate = detectedResult.date || raceDate || '';
+        const saved = await loadJSON(`boatrace:races:${resultVenue}`, []);
+        let targetIndex = (saved || []).findIndex(r =>
+          (!resultRaceNo || String(r.raceNo || '').replace(/R/gi, '') === resultRaceNo) &&
+          (!resultDate || !r.date || r.date === resultDate)
+        );
+        if (targetIndex < 0) targetIndex = (saved || []).findIndex(r => !r.result);
+        if (targetIndex >= 0) {
+          const updatedSaved = [...saved];
+          const targetRace = updatedSaved[targetIndex];
+          const unitPayout = Math.max(0, Number(detectedResult.payoutYen) || 0);
+          const hitBet = Array.isArray(targetRace.bets)
+            ? targetRace.bets.find(b => b.combo === detectedResult.trifecta)
+            : null;
+          const actualPayout = hitBet && unitPayout > 0
+            ? Math.round(unitPayout * (Math.max(0, Number(hitBet.yen) || 0) / 100))
+            : unitPayout;
+          updatedSaved[targetIndex] = {
+            ...targetRace,
+            result: detectedResult.trifecta,
+            payoutYen: actualPayout || targetRace.payoutYen || 0,
+            resultImportedAt: new Date().toISOString(),
+          };
+          await saveJSON(`boatrace:races:${resultVenue}`, updatedSaved);
+          if (resultVenue === venue) setRaces(updatedSaved);
+          setStatus(`結果 ${detectedResult.trifecta} を保存済みレースへ自動反映しました`);
+        } else {
+          setStatus(`結果 ${detectedResult.trifecta} を読み取りました。対応する保存済みレースが見つかりません`);
+        }
+      }
+
+      const hasBoatData = Array.isArray(result?.boats) && result.boats.some(b => b && (b.name || b.registrationNumber || b.exhibitionTime != null || b.nationalWinRate != null));
+      if (!hasBoatData && detectedResult?.detected) {
+        setImageCanRetry(false);
+        return;
+      }
+
       const normalized = normalizeAIBoats(
   result.boats,
   result.odds,
   result.positionReturns
 );
       const normalizedWeather = normalizeWeather(result.weather);
-      const scored = computeScores(normalized, venue, normalizedWeather);
+      const scored = computeScores(normalized, venue, normalizedWeather, adaptiveProfile.weights);
       setBoats(scored);
       setWeather(normalizedWeather);
 
@@ -1664,7 +1747,7 @@ setForecast(generateForecast(scored));
         <div style={{ marginTop: 10, marginBottom: 16, borderTop: '1px solid #1c2b3d', paddingTop: 14 }}>
           <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 4 }}>④ 画像から読み込む(β)</div>
           <div style={{ fontSize: 11, color: '#8ba3bd', marginBottom: 8 }}>
-            出走表・直前情報・展示情報・今節成績のスクショをまとめて渡すと、着順も含めてAIが読み取ります。テキスト貼り付けと併用可(画像解析すると①〜③の内容は上書きされます)。
+            出走表・直前情報・展示情報・今節成績・オッズ・レース結果のスクショをまとめて読み取れます。結果画像だけなら保存済みレースへ自動反映します。テキスト貼り付けと併用可(画像解析すると①〜③の内容は上書きされます)。
           </div>
           <label style={{
             display: 'inline-block', background: '#131f2e', color: '#e8edf2', border: '1px dashed #2a3d52',
@@ -2258,6 +2341,27 @@ setForecast(generateForecast(scored));
         </div>
 
         <div style={{ marginTop: 22, background: '#111d2b', border: '1px solid #2a3d52', borderRadius: 10, padding: 14 }}>
+          <div style={{ fontSize: 14, fontWeight: 900, color: adaptiveProfile.active ? '#52d273' : '#8ba3bd', marginBottom: 8 }}>⚙️ 自動学習補正</div>
+          <div style={{ fontSize: 11, color: '#8ba3bd', lineHeight: 1.6, marginBottom: 10 }}>
+            {adaptiveProfile.active
+              ? `${venue}の結果${adaptiveProfile.sampleSize}件から、基本ロジックを壊さない範囲(±15%)で予想ウェイトを自動補正中です。`
+              : `結果が20件たまると、${venue}専用のウェイト補正を自動開始します。現在${adaptiveProfile.sampleSize}/20件。`}
+          </div>
+          {adaptiveProfile.active && <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6 }}>
+            {[
+              ['実力','player'],['機力','gear'],['コース','course'],['展示','exhibition'],['ST','start'],['級別','class']
+            ].map(([label,key]) => {
+              const value = adaptiveProfile.weights[key] || 1;
+              const pct = Math.round((value - 1) * 100);
+              return <div key={key} style={{ background:'#0f1a28', borderRadius:6, padding:'6px 4px', textAlign:'center' }}>
+                <div style={{ fontSize:9, color:'#8ba3bd' }}>{label}</div>
+                <div style={{ fontSize:12, fontWeight:800, color:pct > 0 ? '#52d273' : pct < 0 ? '#ff9b6b' : '#c5d3e0' }}>{pct > 0 ? '+' : ''}{pct}%</div>
+              </div>;
+            })}
+          </div>}
+        </div>
+
+        <div style={{ marginTop: 12, background: '#111d2b', border: '1px solid #2a3d52', borderRadius: 10, padding: 14 }}>
           <div style={{ fontSize: 14, fontWeight: 900, color: '#e8b800', marginBottom: 8 }}>🧠 AI学習ログ</div>
           <div style={{ fontSize: 11, color: '#8ba3bd', lineHeight: 1.6, marginBottom: 10 }}>
             保存レースに結果を入力すると、的中傾向を端末内に蓄積して検証できます。現時点では自動で予想係数を書き換えず、学習データとして安全に可視化します。
