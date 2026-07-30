@@ -1125,7 +1125,7 @@ boatsは必ずlane 1〜6の6艇分を含めてください。今節成績の着�
 
 async function callVisionAPI(images, onProgress = (info: any) => {}) {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 180000);
+  const timeoutId = setTimeout(() => controller.abort(), 110000);
   try {
     onProgress({ phase: 'connecting' });
     const response = await fetch('https://geminiapikey.uimaru02.workers.dev', {
@@ -1145,9 +1145,16 @@ async function callVisionAPI(images, onProgress = (info: any) => {}) {
       return result.data;
     }
 
-    const err = new Error(result.error || result.details || '画像解析APIでエラーが発生しました');
+    const history = Array.isArray(result.fallbackHistory) ? result.fallbackHistory : [];
+    const historyText = history.length
+      ? history.map((item) => `${item.model}:${item.status}`).join(' → ')
+      : '';
+    const baseMessage = result.error || result.details || '画像解析APIでエラーが発生しました';
+    const err = new Error(historyText ? `${baseMessage}（${historyText}）` : baseMessage);
     err.retryable = Boolean(result.retryable) || [408, 429, 500, 502, 503, 504].includes(response.status);
     err.status = response.status;
+    err.errorCode = result.errorCode || 'API_ERROR';
+    err.history = history;
     throw err;
   } catch (error) {
     if (error?.name === 'AbortError') {
@@ -1634,7 +1641,7 @@ export default function BoatRaceTool() {
         if (info.phase === 'connecting') {
           setRetryCountdown(0);
           setServerState('working');
-          setImageProgress({ phase: 'connecting', percent: 35, label: 'AIへ接続しています（混雑時はWorker内で最大3回まで再試行）' });
+          setImageProgress({ phase: 'connecting', percent: 35, label: 'AIへ接続しています（Workerから最大2回まで試行）' });
         } else if (info.phase === 'validating') {
           setImageProgress({ phase: 'validating', percent: 82, label: '読み取り結果を検証しています' });
         } else if (info.phase === 'complete') {
@@ -1723,9 +1730,17 @@ setForecast(generateForecast(scored));
       setServerState(retryable ? 'busy' : 'error');
       setImageCanRetry(retryable);
       setImageProgress({ phase: 'error', percent: 0, label: '' });
-      setImageError(retryable
-        ? 'AIサーバーが混雑しています。Worker内で最大3回まで再試行しました。画像は保持されていますので、少し待ってからもう一度試してください。'
-        : ((e && e.message) ? e.message : '画像の解析に失敗しました'));
+      const code = e?.errorCode || '';
+      const message = (e && e.message) ? e.message : '画像の解析に失敗しました';
+      setImageError(
+        code === 'GEMINI_BUSY'
+          ? `${message} 少し待ってから再試行してください。`
+          : code === 'GEMINI_AUTH' || code === 'GEMINI_MODEL'
+            ? message
+            : retryable
+              ? `${message} 画像は保持されています。少し待ってから再試行してください。`
+              : message
+      );
     } finally {
       setRetryCountdown(0);
       setImageLoading(false);
@@ -1932,7 +1947,7 @@ setForecast(generateForecast(scored));
                   {imageLoading ? '再試行中...' : '同じ画像でもう一度試す'}
                 </button>
               )}
-              <div style={{ fontSize: 11, color: '#b7c4d4', marginTop: 6 }}>選択した画像は消えません。画面側では再送せず、Worker内だけで最大3回まで再試行します。</div>
+              <div style={{ fontSize: 11, color: '#b7c4d4', marginTop: 6 }}>選択した画像は消えません。画面側では自動再送せず、Worker内だけで最大2回まで試行します。</div>
             </div>
           )}
         </div>
