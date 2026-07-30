@@ -1,11 +1,12 @@
 const ALLOWED_ORIGIN = "https://iidasenpai.github.io";
 
+// 1回の画面操作につき、WorkerからGeminiへ送るのは最大2回だけ。
+// 長い3連続試行はブラウザ側タイムアウトとレート制限を誘発するため廃止。
 const GEMINI_ATTEMPT_PLAN = [
   { model: "gemini-2.5-flash", waitBeforeMs: 0 },
-  { model: "gemini-2.5-flash", waitBeforeMs: 2500 },
-  { model: "gemini-2.5-flash-lite", waitBeforeMs: 4000 },
+  { model: "gemini-2.5-flash-lite", waitBeforeMs: 3000 },
 ];
-const GEMINI_TIMEOUT_MS = 55000;
+const GEMINI_TIMEOUT_MS = 45000;
 const RETRYABLE_STATUS = new Set([408, 409, 429, 500, 502, 503, 504]);
 
 function sleep(ms) {
@@ -70,17 +71,28 @@ async function callGeminiWithRetry(env, payload) {
 
       lastStatus = response.status;
       lastMessage = result?.error?.message || `Gemini APIエラー (${response.status})`;
-      history.push({ model, attempt, status: response.status });
+      history.push({
+        model,
+        attempt,
+        status: response.status,
+        message: String(lastMessage).slice(0, 240),
+      });
 
+      // 404はモデル名・API仕様の問題なので連打しない。
       const retryable = RETRYABLE_STATUS.has(response.status) ||
-        response.status === 404 || isDemandError(response.status, lastMessage);
+        isDemandError(response.status, lastMessage);
       if (!retryable) break;
     } catch (error) {
       lastStatus = error?.name === "AbortError" ? 504 : 502;
       lastMessage = error?.name === "AbortError"
         ? "AIサーバーの応答がタイムアウトしました。"
         : (error instanceof Error ? error.message : String(error));
-      history.push({ model, attempt, status: lastStatus });
+      history.push({
+        model,
+        attempt,
+        status: lastStatus,
+        message: String(lastMessage).slice(0, 240),
+      });
     } finally {
       clearTimeout(timeoutId);
     }
@@ -89,10 +101,25 @@ async function callGeminiWithRetry(env, payload) {
   const demand = isDemandError(lastStatus, lastMessage);
   const err = new Error(lastMessage);
   err.status = demand ? 503 : lastStatus;
-  err.retryable = demand || RETRYABLE_STATUS.has(lastStatus) || lastStatus === 404;
+  err.retryable = demand || RETRYABLE_STATUS.has(lastStatus);
+  err.errorCode = demand
+    ? "GEMINI_BUSY"
+    : lastStatus === 401 || lastStatus === 403
+      ? "GEMINI_AUTH"
+      : lastStatus === 404
+        ? "GEMINI_MODEL"
+        : lastStatus === 504
+          ? "GEMINI_TIMEOUT"
+          : "GEMINI_REQUEST";
   err.userMessage = demand
-    ? "AIサーバーが混雑しています。画像は保持されていますので、少し待ってから再試行してください。"
-    : "画像解析に失敗しました。画像は保持されていますので再試行できます。";
+    ? "Gemini APIが混雑または利用上限に達しています。画像は保持されています。"
+    : lastStatus === 401 || lastStatus === 403
+      ? "Gemini APIの認証に失敗しました。CloudflareのGEMINI_API_KEY設定を確認してください。"
+      : lastStatus === 404
+        ? "指定したGeminiモデルを利用できません。Workerのモデル設定を確認してください。"
+        : lastStatus === 504
+          ? "Gemini APIの応答がタイムアウトしました。画像は保持されています。"
+          : "Gemini APIへの画像解析リクエストに失敗しました。画像は保持されています。";
   err.history = history;
   throw err;
 }
@@ -340,6 +367,8 @@ boatsは1号艇から6号艇の順に整理してください。
           error: error?.userMessage || "Workerでエラーが発生しました。",
           details: error instanceof Error ? error.message : String(error),
           retryable: Boolean(error?.retryable),
+          errorCode: error?.errorCode || "WORKER_ERROR",
+          upstreamStatus: Number(error?.status) || status,
           fallbackHistory: error?.history || [],
         },
         status
