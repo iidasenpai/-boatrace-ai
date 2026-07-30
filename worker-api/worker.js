@@ -1,18 +1,21 @@
 const ALLOWED_ORIGIN = "https://iidasenpai.github.io";
 
-// 利用可能モデルはGeminiのmodels.listから取得し、10分間キャッシュする。
-// 固定モデル名だけに依存しないため、利用不可モデルへの404を防ぐ。
+// Geminiのモデル名は廃止・更新されるため固定しない。
+// models.list で、このAPIキーから現在利用できて generateContent に対応する
+// 画像対応のFlash系モデルを確認してから最大2回だけ呼び出す。
+const GEMINI_TIMEOUT_MS = 60000;
+const MODEL_LIST_TIMEOUT_MS = 12000;
 const MODEL_CACHE_TTL_MS = 10 * 60 * 1000;
-const GEMINI_TIMEOUT_MS = 55000;
 const RETRYABLE_STATUS = new Set([408, 409, 429, 500, 502, 503, 504]);
-let modelCache = { expiresAt: 0, models: [], source: "none" };
+
+let modelCache = { expiresAt: 0, models: [] };
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function jitter(ms) {
-  return ms + Math.floor(Math.random() * 1800);
+  return ms + Math.floor(Math.random() * 1200);
 }
 
 function isDemandError(status, message = "") {
@@ -37,133 +40,117 @@ function extractJsonText(text) {
   return first >= 0 && last > first ? raw.slice(first, last + 1) : raw;
 }
 
-function normalizeModelName(model) {
-  return String(model?.baseModelId || model?.name || "")
-    .replace(/^models\//, "")
-    .trim();
+function normalizeModelName(name) {
+  return String(name || "").replace(/^models\//, "");
 }
 
-function modelPriority(name) {
-  const n = String(name).toLowerCase();
-  // 画像からの構造化抽出に向く安定版Flashを優先する。
-  if (n === "gemini-2.5-flash") return 0;
-  if (n === "gemini-2.5-flash-lite") return 1;
-  if (n === "gemini-flash-latest") return 2;
-  if (n.includes("flash") && !n.includes("preview") && !n.includes("exp")) return 3;
-  if (n.includes("flash")) return 4;
-  return 20;
+function rankModel(model) {
+  const id = normalizeModelName(model?.name || model);
+  let score = 0;
+  if (/gemini-3\.6-flash$/i.test(id)) score += 1000;
+  if (/gemini-3.*flash/i.test(id)) score += 800;
+  if (/gemini-2\.5.*flash/i.test(id)) score += 600;
+  if (/flash/i.test(id)) score += 300;
+  if (/lite/i.test(id)) score -= 20;
+  if (/preview/i.test(id)) score -= 10;
+  if (/exp|experimental/i.test(id)) score -= 80;
+  if (/deprecated|embedding|image-generation|tts|audio|live/i.test(id)) score -= 1000;
+  return score;
 }
 
 async function listAvailableModels(env, forceRefresh = false) {
   const now = Date.now();
   if (!forceRefresh && modelCache.models.length && modelCache.expiresAt > now) {
-    return modelCache;
+    return { models: modelCache.models, source: "cache" };
   }
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 15000);
+  const timeoutId = setTimeout(() => controller.abort(), MODEL_LIST_TIMEOUT_MS);
   try {
-    const response = await fetch(
-      "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000",
-      {
-        method: "GET",
-        headers: { "x-goog-api-key": env.GEMINI_API_KEY },
-        signal: controller.signal,
-      }
-    );
+    const url = `https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000&key=${encodeURIComponent(env.GEMINI_API_KEY)}`;
+    const response = await fetch(url, { method: "GET", signal: controller.signal });
+    const result = await response.json().catch(() => ({}));
     if (!response.ok) {
-      throw new Error(`models.list:${response.status}`);
+      const message = result?.error?.message || `models.list error (${response.status})`;
+      const error = new Error(message);
+      error.status = response.status;
+      throw error;
     }
-    const data = await response.json();
-    const names = (Array.isArray(data?.models) ? data.models : [])
+
+    const models = (Array.isArray(result?.models) ? result.models : [])
       .filter((model) => {
-        const methods = model?.supportedGenerationMethods || model?.supportedActions || [];
-        return methods.includes("generateContent");
+        const methods = Array.isArray(model?.supportedGenerationMethods)
+          ? model.supportedGenerationMethods
+          : [];
+        const id = normalizeModelName(model?.name);
+        return methods.includes("generateContent") &&
+          /gemini/i.test(id) &&
+          /flash/i.test(id) &&
+          !/embedding|image-generation|tts|audio|live/i.test(id);
       })
-      .map(normalizeModelName)
-      .filter((name) => name && name.toLowerCase().includes("gemini") && name.toLowerCase().includes("flash"));
+      .sort((a, b) => rankModel(b) - rankModel(a))
+      .map((model) => normalizeModelName(model.name));
 
-    const unique = [...new Set(names)].sort((a, b) => {
-      const priority = modelPriority(a) - modelPriority(b);
-      return priority || a.localeCompare(b);
-    });
-
-    if (!unique.length) throw new Error("利用可能なFlashモデルが見つかりませんでした。");
-    modelCache = {
-      models: unique,
-      expiresAt: now + MODEL_CACHE_TTL_MS,
-      source: "models.list",
-    };
-    return modelCache;
-  } catch (error) {
-    // 一覧取得だけが一時失敗した場合は、前回成功キャッシュを使う。
-    if (modelCache.models.length) {
-      return { ...modelCache, source: "stale-cache" };
+    if (!models.length) {
+      const error = new Error("generateContent対応のFlashモデルが一覧にありません。");
+      error.status = 404;
+      throw error;
     }
-    // 最終保険。404が出た場合はキャッシュを破棄し、次回一覧を再取得する。
-    return {
-      models: ["gemini-2.5-flash"],
-      expiresAt: now + 60 * 1000,
-      source: "safe-fallback",
-      listError: error instanceof Error ? error.message : String(error),
-    };
+
+    modelCache = { models, expiresAt: now + MODEL_CACHE_TTL_MS };
+    return { models, source: "models.list" };
   } finally {
     clearTimeout(timeoutId);
   }
 }
 
-async function requestGemini(env, model, payload) {
+async function fetchGemini(env, model, payload) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS);
   try {
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-goog-api-key": env.GEMINI_API_KEY,
-        },
-        body: JSON.stringify(payload),
-        signal: controller.signal,
-      }
-    );
-    let result = {};
-    try { result = await response.json(); } catch { result = {}; }
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(env.GEMINI_API_KEY)}`;
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+    const result = await response.json().catch(() => ({}));
     return { response, result };
-  } catch (error) {
-    const wrapped = new Error(error instanceof Error ? error.message : String(error));
-    wrapped.status = error?.name === "AbortError" ? 504 : 502;
-    wrapped.isTimeout = error?.name === "AbortError";
-    throw wrapped;
   } finally {
     clearTimeout(timeoutId);
   }
 }
 
 async function callGeminiWithRetry(env, payload) {
-  const discovery = await listAvailableModels(env);
-  const candidates = discovery.models.slice(0, 2);
-  // 1モデルしか見つからない場合だけ、同じモデルを1回再試行する。
-  const attemptPlan = candidates.length >= 2
-    ? [
-        { model: candidates[0], waitBeforeMs: 0 },
-        { model: candidates[1], waitBeforeMs: 7000 },
-      ]
-    : [
-        { model: candidates[0], waitBeforeMs: 0 },
-        { model: candidates[0], waitBeforeMs: 9000 },
-      ];
+  let discovered;
+  try {
+    discovered = await listAvailableModels(env);
+  } catch (error) {
+    const status = Number(error?.status) || 502;
+    const err = new Error(error instanceof Error ? error.message : String(error));
+    err.status = status;
+    err.retryable = RETRYABLE_STATUS.has(status) || isDemandError(status, err.message);
+    err.errorCode = status === 401 || status === 403 ? "GEMINI_AUTH" : "GEMINI_MODEL_LIST";
+    err.userMessage = status === 401 || status === 403
+      ? "Gemini APIの認証に失敗しました。CloudflareのGEMINI_API_KEY設定を確認してください。"
+      : "このAPIキーで利用可能なGeminiモデルを確認できませんでした。少し待って再試行してください。";
+    err.history = [{ model: "models.list", attempt: 1, status, message: err.message.slice(0, 240) }];
+    throw err;
+  }
 
+  // 1操作につき最大2モデル。過剰な再送を防ぐ。
+  const attemptModels = discovered.models.slice(0, 2);
+  let lastStatus = 502;
+  let lastMessage = "AIサーバーから応答を受け取れませんでした。";
   const history = [];
-  let strongestFailure = null;
 
-  for (let index = 0; index < attemptPlan.length; index += 1) {
-    const { model, waitBeforeMs } = attemptPlan[index];
-    if (waitBeforeMs > 0) await sleep(jitter(waitBeforeMs));
+  for (let index = 0; index < attemptModels.length; index += 1) {
+    const model = attemptModels[index];
+    if (index > 0) await sleep(jitter(5000));
 
     try {
-      const { response, result } = await requestGemini(env, model, payload);
+      const { response, result } = await fetchGemini(env, model, payload);
       if (response.ok) {
         return {
           response,
@@ -171,79 +158,67 @@ async function callGeminiWithRetry(env, payload) {
           attempts: index + 1,
           model,
           history,
-          availableModels: discovery.models.slice(0, 8),
-          modelSource: discovery.source,
+          availableModels: discovered.models,
+          modelSource: discovered.source,
         };
       }
 
-      const message = result?.error?.message || `Gemini APIエラー (${response.status})`;
-      const failure = {
+      lastStatus = response.status;
+      lastMessage = result?.error?.message || `Gemini APIエラー (${response.status})`;
+      history.push({
         model,
         attempt: index + 1,
         status: response.status,
-        message: String(message).slice(0, 400),
-      };
-      history.push(failure);
+        message: String(lastMessage).slice(0, 240),
+      });
 
-      // 429/503は、後続の404より優先してユーザーへ伝えるべき原因。
-      if (!strongestFailure || isDemandError(response.status, message) || strongestFailure.status === 404) {
-        strongestFailure = failure;
-      }
+      // 一覧に載っていたモデルが404ならキャッシュを捨てる。
+      if (response.status === 404) modelCache = { expiresAt: 0, models: [] };
 
-      if (response.status === 404) {
-        // モデル一覧キャッシュが古い可能性があるため破棄する。
-        modelCache = { expiresAt: 0, models: [], source: "none" };
-      }
-
-      const retryable = RETRYABLE_STATUS.has(response.status) || isDemandError(response.status, message) || response.status === 404;
+      const retryable = RETRYABLE_STATUS.has(response.status) ||
+        isDemandError(response.status, lastMessage) ||
+        response.status === 404;
       if (!retryable) break;
     } catch (error) {
-      const status = Number(error?.status) || 502;
-      const message = error?.isTimeout
+      lastStatus = error?.name === "AbortError" ? 504 : 502;
+      lastMessage = error?.name === "AbortError"
         ? "AIサーバーの応答がタイムアウトしました。"
         : (error instanceof Error ? error.message : String(error));
-      const failure = {
+      history.push({
         model,
         attempt: index + 1,
-        status,
-        message: String(message).slice(0, 400),
-      };
-      history.push(failure);
-      if (!strongestFailure || strongestFailure.status === 404) strongestFailure = failure;
+        status: lastStatus,
+        message: String(lastMessage).slice(0, 240),
+      });
     }
   }
 
-  const last = strongestFailure || history[history.length - 1] || {
-    status: 502,
-    message: "AIサーバーから応答を受け取れませんでした。",
-  };
-  const status = Number(last.status) || 502;
-  const message = last.message || "AIサーバーから応答を受け取れませんでした。";
-  const demand = isDemandError(status, message);
-  const err = new Error(message);
-  err.status = demand ? 503 : status;
-  err.retryable = demand || RETRYABLE_STATUS.has(status);
+  const demand = history.some((item) => isDemandError(item.status, item.message));
+  const all404 = history.length > 0 && history.every((item) => item.status === 404);
+  const err = new Error(lastMessage);
+  err.status = demand ? 503 : lastStatus;
+  err.retryable = demand || RETRYABLE_STATUS.has(lastStatus);
   err.errorCode = demand
-    ? "GEMINI_LIMIT"
-    : status === 401 || status === 403
+    ? "GEMINI_BUSY"
+    : lastStatus === 401 || lastStatus === 403
       ? "GEMINI_AUTH"
-      : status === 404
+      : all404
         ? "GEMINI_MODEL"
-        : status === 504
+        : lastStatus === 504
           ? "GEMINI_TIMEOUT"
           : "GEMINI_REQUEST";
   err.userMessage = demand
-    ? "Gemini APIの利用上限または一時的な混雑で解析できませんでした。画像は保持されています。"
-    : status === 401 || status === 403
+    ? "Gemini APIが混雑または利用上限に達しています。画像は保持されています。"
+    : lastStatus === 401 || lastStatus === 403
       ? "Gemini APIの認証に失敗しました。CloudflareのGEMINI_API_KEY設定を確認してください。"
-      : status === 404
-        ? "このAPIキーで利用可能な画像解析モデルを確認できませんでした。時間を空けて再試行してください。"
-        : status === 504
+      : all404
+        ? "利用可能モデル一覧は取得できましたが、画像解析モデルの呼び出しに失敗しました。"
+        : lastStatus === 504
           ? "Gemini APIの応答がタイムアウトしました。画像は保持されています。"
           : "Gemini APIへの画像解析リクエストに失敗しました。画像は保持されています。";
   err.history = history;
-  err.availableModels = discovery.models.slice(0, 8);
-  err.modelSource = discovery.source;
+  err.availableModels = discovered.models;
+  err.modelSource = discovered.source;
   throw err;
 }
 
