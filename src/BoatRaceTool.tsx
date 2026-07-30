@@ -402,15 +402,21 @@ function calculateReturnExpectation(
   let label;
   let level;
 
-  if (score >= 120) {
+  if (score >= 85) {
+    label = '超高';
+    level = 'veryHigh';
+  } else if (score >= 75) {
     label = '高';
     level = 'high';
-  } else if (score >= 80) {
+  } else if (score >= 65) {
     label = '標準';
     level = 'standard';
-  } else {
+  } else if (score >= 55) {
     label = '低';
     level = 'low';
+  } else {
+    label = '極低';
+    level = 'veryLow';
   }
 
   return {
@@ -576,9 +582,9 @@ function rankAndAllocateBets(bets, boats, budgetYen) {
     const firstBoat = boats.find(b => b.lane === firstLane);
     // 1着艇に明確な危険材料がある買い目は最優先になりにくくする。
     const firstDangerPenalty = Math.min(18, Number(firstBoat?.dangerScore || 0) * 0.55);
-    const rawIndex = clampScore(hitScore * 0.62 + valueScore * 0.20 + flowScore * 0.18 - firstDangerPenalty);
-    // 表示用AI指数は70〜100中心に再スケールし、レース信頼度との見た目の乖離を抑える
-    const aiIndex = Math.round((62 + rawIndex * 0.33) * 10) / 10;
+    // 予想・妙味・展開・危険度を一つの最終スコアへ統合。以後の順位・最優先表示・資金配分はすべてこれを使う。
+    const finalScore = clampScore(hitScore * 0.48 + valueScore * 0.22 + flowScore * 0.22 + (100 - firstDangerPenalty * 4) * 0.08);
+    const aiIndex = Math.round((58 + finalScore * 0.40) * 10) / 10;
     const rankLabel = aiIndex >= 92 ? '超本命' : aiIndex >= 85 ? '本命' : aiIndex >= 79 ? '強め' : aiIndex >= 72 ? 'バランス' : '高配当寄り';
     const rankLevel = aiIndex >= 85 ? 'main' : aiIndex >= 72 ? 'balance' : 'longshot';
 
@@ -601,18 +607,19 @@ function rankAndAllocateBets(bets, boats, budgetYen) {
       startScore,
       motorScore,
       flowLabel: getBetFlowLabel(bet.combo, boats),
+      finalScore: Math.round(finalScore * 10) / 10,
       aiIndex,
       aiStars: getStars(aiIndex),
       rankLabel,
       rankLevel,
     };
-  }).sort((a, b) => b.aiIndex - a.aiIndex || (Number(b.prob) || 0) - (Number(a.prob) || 0));
+  }).sort((a, b) => b.finalScore - a.finalScore || b.aiIndex - a.aiIndex || (Number(b.prob) || 0) - (Number(a.prob) || 0));
 
   const units = Math.max(1, Math.floor(Math.max(0, Number(budgetYen) || 0) / 100));
   const desiredCount = units <= 3 ? units : units <= 5 ? 3 : Math.min(6, Math.max(3, Math.round(units * 0.65)));
   const activeCount = Math.min(enriched.length, units, desiredCount);
   const active = enriched.slice(0, activeCount);
-  const weights = active.map((b, i) => Math.max(1, b.aiIndex ** 1.7 * (i === 0 ? 1.18 : 1)));
+  const weights = active.map((b, i) => Math.max(1, b.finalScore ** 1.7 * (i === 0 ? 1.18 : 1)));
   const weightSum = weights.reduce((a, c) => a + c, 0) || 1;
   const alloc = active.map(() => 1);
   let remaining = units - activeCount;
@@ -1280,31 +1287,59 @@ function getRealtimeTrend(boat) {
   return { delta, label: '→', color: '#8ba3bd' };
 }
 
-function generateBetComment(bet, boats) {
+function generateBetComment(bet, boats, weather = null) {
   const lanes = String(bet?.combo || '').split('-').map(Number);
   const selected = lanes.map(lane => boats?.find(b => b.lane === lane)).filter(Boolean);
-  if (selected.length < 3) return '総合評価と展開適性を組み合わせた候補です。';
+  if (selected.length < 3) return '総合評価・展開・妙味を統合した候補です。';
   const [first, second, third] = selected;
   const firstCourse = Number(first.entryCourse || first.lane);
-  const parts = [];
-  if (firstCourse === 1) parts.push(`${first.lane}号艇のイン逃げを軸`);
-  else if (firstCourse === 4) parts.push(`${first.lane}号艇のカド攻めを軸`);
-  else if (firstCourse === 2 || firstCourse === 3) parts.push(`${first.lane}号艇の差し・まくり差しを軸`);
-  else parts.push(`${first.lane}号艇の外伸びを軸`);
+  const strengths = [];
+  if (Number(first.exScore || 0) >= 75) strengths.push('展示上位');
+  if (Number(first.stScore || 0) >= 75) strengths.push('ST上位');
+  if (Number(first.gearScore || 0) >= 65) strengths.push('機力上位');
+  if (first.classG === 'A1') strengths.push('A1級');
+  if (firstCourse === 1) strengths.push('イン有利');
+  if (firstCourse === 4) strengths.push('カド攻め');
 
-  const secondWeapons = [];
-  if (second.classG === 'A1') secondWeapons.push('A1級');
-  if (Number(second.gearScore || 0) >= 65) secondWeapons.push('機力上位');
-  if (Number(second.exScore || 0) >= 70) secondWeapons.push('展示上位');
-  if (Number(second.stScore || 0) >= 70) secondWeapons.push('ST上位');
-  parts.push(`${second.lane}号艇を${secondWeapons.join('・') || '総合力'}で相手本線`);
+  let opening;
+  if (firstCourse === 1) opening = `${strengths.slice(0, 2).join('・') || '総合力上位'}の${first.lane}号艇をイン逃げ軸`;
+  else if (firstCourse === 4) opening = `${strengths.slice(0, 2).join('・') || '攻撃力上位'}の${first.lane}号艇をカド攻め軸`;
+  else if (firstCourse === 2 || firstCourse === 3) opening = `${strengths.slice(0, 2).join('・') || '直前気配上位'}の${first.lane}号艇を差し・まくり差し軸`;
+  else opening = `${strengths.slice(0, 2).join('・') || '外伸び気配'}の${first.lane}号艇を一撃軸`;
 
-  const thirdWeapons = [];
-  if (Number(third.exScore || 0) >= 68) thirdWeapons.push('展示気配');
-  if (Number(third.gearScore || 0) >= 62) thirdWeapons.push('機力');
-  if (Number(third.targetScore || 0) >= 55) thirdWeapons.push('穴適性');
-  parts.push(`${third.lane}号艇は${thirdWeapons.join('・') || '連下安定度'}を評価`);
-  return `${parts.join('、')}。`;
+  const secondReasons = [];
+  if (second.classG === 'A1') secondReasons.push('A1級');
+  if (Number(second.gearScore || 0) >= 65) secondReasons.push('機力');
+  if (Number(second.exScore || 0) >= 70) secondReasons.push('展示');
+  if (Number(second.stScore || 0) >= 70) secondReasons.push('ST');
+
+  const thirdReasons = [];
+  if (Number(third.exScore || 0) >= 68) thirdReasons.push('展示気配');
+  if (Number(third.gearScore || 0) >= 62) thirdReasons.push('機力');
+  if (Number(third.targetScore || 0) >= 55) thirdReasons.push('穴適性');
+  if (Number(third.stScore || 0) >= 65) thirdReasons.push('ST');
+
+  const weatherNote = weather?.windDirection
+    ? `。${weather.windDirection}${Number(weather.wind || 0) >= 4 ? 'で展開変化にも注意' : 'で水面影響は限定的'}`
+    : '';
+  return `${opening}。${second.lane}号艇は${secondReasons.slice(0, 2).join('・') || '総合力'}で相手本線、${third.lane}号艇は${thirdReasons.slice(0, 2).join('・') || '連下安定度'}を評価${weatherNote}。`;
+}
+
+function getDangerProfile(boat) {
+  if (!boat) return { stars: '☆☆☆☆☆', reasons: [] };
+  const reasons = [...(boat.dangerReasons || [])];
+  if (Number(boat.exScore || 0) < 35 && !reasons.some(r => String(r).includes('展示'))) reasons.push('展示下位');
+  if (Number(boat.stScore || 0) < 35 && !reasons.some(r => String(r).includes('ST'))) reasons.push('ST不安');
+  if (Number(boat.gearScore || 0) < 35 && !reasons.some(r => String(r).includes('機力'))) reasons.push('機力不足');
+  if (boat.classG === 'B2') reasons.push('級別不利');
+  if (Number(boat.entryCourse || boat.lane) >= 5) reasons.push('外枠');
+  const level = Math.max(1, Math.min(5, Math.ceil((Number(boat.dangerScore || 0) + reasons.length * 4) / 10)));
+  return { stars: '★'.repeat(level) + '☆'.repeat(5 - level), reasons: [...new Set(reasons)].slice(0, 5) };
+}
+
+function metricStars(value) {
+  const n = Math.max(1, Math.min(5, Math.round(Number(value || 0) / 20)));
+  return '★'.repeat(n) + '☆'.repeat(5 - n);
 }
 
 function getRaceSummary(boats) {
@@ -1698,6 +1733,13 @@ setForecast(generateForecast(scored));
   const raceSummary = getRaceSummary(boats);
   const raceGrade = getRaceGrade(raceSummary);
   const learningSummary = buildLearningSummary(races);
+  const raceMetrics = raceSummary ? {
+    battle: Math.round(clampScore(raceGrade.recommendation * 0.65 + raceSummary.confidence * 0.35)),
+    returnScore: Math.round(clampScore(50 + (100 - raceSummary.chaosIndex) * 0.25 + raceSummary.topGap * 1.4)),
+    upset: Math.round(clampScore(raceSummary.chaosIndex)),
+    favorite: Math.round(clampScore(raceSummary.confidence * 0.72 + Math.max(0, raceSummary.topGap) * 2.2)),
+    longshot: Math.round(clampScore((raceSummary.targetBoat?.targetScore || 0) * 0.8 + raceSummary.chaosIndex * 0.2)),
+  } : null;
 
   return (
     <div style={{ minHeight: '100vh', background: '#0b1420', color: '#e8edf2', fontFamily: 'system-ui, -apple-system, "Hiragino Sans", sans-serif' }}>
@@ -1903,6 +1945,23 @@ setForecast(generateForecast(scored));
                 }} />
               </div>
 
+              {raceMetrics && <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 7, marginBottom: 10 }}>
+                {[
+                  ['勝負度', raceMetrics.battle, '#52d273'],
+                  ['期待回収', raceMetrics.returnScore, '#7aa6e8'],
+                  ['荒れ予想', raceMetrics.upset, '#ff9b6b'],
+                  ['本命度', raceMetrics.favorite, '#e8b800'],
+                  ['穴期待', raceMetrics.longshot, '#c77dff'],
+                ].map(([label, value, color]) => <div key={String(label)} style={{ background: '#0f1a28', borderRadius: 8, padding: '8px 9px' }}>
+                  <div style={{ fontSize: 10, color: '#8ba3bd' }}>{label}</div>
+                  <div style={{ fontSize: 13, fontWeight: 900, color: String(color) }}>{metricStars(Number(value))} <span style={{ fontSize: 10 }}>{value}点</span></div>
+                </div>)}
+                <div style={{ background: '#0f1a28', borderRadius: 8, padding: '8px 9px' }}>
+                  <div style={{ fontSize: 10, color: '#8ba3bd' }}>学習状況</div>
+                  <div style={{ fontSize: 12, fontWeight: 900, color: adaptiveProfile.active ? '#52d273' : '#8ba3bd' }}>{adaptiveProfile.active ? `補正ON ${adaptiveProfile.sampleSize}件` : `${adaptiveProfile.sampleSize}/20件`}</div>
+                </div>
+              </div>}
+
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
                 <div style={{ background: '#0f1a28', borderRadius: 8, padding: 10 }}>
                   <div style={{ fontSize: 10, color: '#8ba3bd' }}>本命</div>
@@ -1942,9 +2001,9 @@ setForecast(generateForecast(scored));
                   </div>
                   <div style={{ background: '#2a171a', border: '1px solid #8d3f47', borderRadius: 8, padding: 9 }}>
                     <div style={{ fontSize: 11, color: '#ff8b95', fontWeight: 800 }}>⚠ 危険艇</div>
-                    <div style={{ fontSize: 15, fontWeight: 800 }}>{raceSummary.dangerBoat.lane}号艇</div>
-                    <div style={{ fontSize: 10, color: '#e4b8bc', lineHeight: 1.4 }}>
-                      {(raceSummary.dangerBoat.dangerReasons || []).slice(0, 2).join('・') || '目立つ危険材料なし'}
+                    <div style={{ fontSize: 15, fontWeight: 800 }}>{raceSummary.dangerBoat.lane}号艇 <span style={{ fontSize: 11, color: '#ff8b95' }}>{getDangerProfile(raceSummary.dangerBoat).stars}</span></div>
+                    <div style={{ fontSize: 10, color: '#e4b8bc', lineHeight: 1.45 }}>
+                      {getDangerProfile(raceSummary.dangerBoat).reasons.join('・') || '目立つ危険材料なし'}
                     </div>
                   </div>
                 </div>
@@ -2065,7 +2124,7 @@ setForecast(generateForecast(scored));
                             {bets[0].flowLabel} ／ AI指数 {bets[0].aiIndex} ／ 展開適性 {bets[0].flowScore}点
                           </div>
                           <div style={{ fontSize: 10, color: '#8ba3bd', marginTop: 3 }}>
-                            AIコメント：{generateBetComment(bets[0], boats)}
+                            AIコメント：{generateBetComment(bets[0], boats, weather)}
                           </div>
                         </div>
                         <div style={{ textAlign: 'right' }}>
@@ -2089,11 +2148,15 @@ setForecast(generateForecast(scored));
                           ? '#ffd54a'
                           : '#ff6b6b';
                     const valueColor =
-                      b.returnExpectationLevel === 'high'
-                        ? '#7aff9b'
-                        : b.returnExpectationLevel === 'standard'
-                          ? '#ffd54a'
-                          : '#ff8080';
+                      b.returnExpectationLevel === 'veryHigh'
+                        ? '#52d273'
+                        : b.returnExpectationLevel === 'high'
+                          ? '#7aff9b'
+                          : b.returnExpectationLevel === 'standard'
+                            ? '#ffd54a'
+                            : b.returnExpectationLevel === 'low'
+                              ? '#ff9b6b'
+                              : '#ff6b6b';
 
                     return (
                       <div
@@ -2118,7 +2181,7 @@ setForecast(generateForecast(scored));
                         <div style={{ minWidth: 0 }}>
                           <div style={{ color: rankColor, fontWeight: 800, fontSize: 12 }}>
                             {b.rankLevel === 'main' ? '🟢' : b.rankLevel === 'balance' ? '🟡' : '🔴'} {b.rankLabel}
-                            {' ／ '}AI指数 {b.aiIndex}
+                            {' ／ '}AI指数 {b.aiIndex} ／ 最終評価 {b.finalScore}
                           </div>
                           <div style={{ color: '#ff9b6b', letterSpacing: 1, fontSize: 12, marginTop: 2 }}>{b.aiStars}</div>
                           <div style={{ fontSize: 11, color: '#8ba3bd', marginTop: 3 }}>
@@ -2128,7 +2191,7 @@ setForecast(generateForecast(scored));
                             内訳：勝率 {b.hitScore}・展示 {b.exhibitScore}・ST {b.startScore}・機力 {b.motorScore}・展開 {b.flowScore}
                           </div>
                           <div style={{ fontSize: 10, color: '#9fb2c6', marginTop: 3, lineHeight: 1.5 }}>
-                            {generateBetComment(b, boats)}
+                            {generateBetComment(b, boats, weather)}
                           </div>
 
                           {b.odds !== null && b.odds !== undefined ? (
