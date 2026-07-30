@@ -149,7 +149,7 @@ export default {
 3. 今節成績
 4. 直前情報・体重・チルト・部品交換
 5. 展示情報・進入・展示ST・展示タイム・風
-6. オッズ情報
+6. オッズ情報・レース結果・払戻金
 
 次のJSON形式だけで返してください。Markdownや説明文は禁止です。
 読めない値は空文字、null、空配列にし、推測で補完しないでください。
@@ -167,6 +167,14 @@ export default {
   "waveHeight": null
 },
 "odds": {},
+"raceResult": {
+  "detected": false,
+  "venue": "",
+  "raceNumber": "",
+  "date": "",
+  "trifecta": "",
+  "payoutYen": null
+},
 "positionReturns": {
   "first": {},
   "second": {},
@@ -258,6 +266,12 @@ firstは1着固定、secondは2着固定、thirdは3着固定です。
 としてください。
 
 回収率の数字を勝率やオッズとして扱わないでください。
+
+
+レース結果画面が含まれる場合は、トップレベルのraceResultへ格納してください。
+3連単の確定着順はtrifectaへ「1-3-5」の形式で、3連単払戻金はpayoutYenへ円単位の数値で返してください。
+会場・レース番号・日付も読める範囲で格納してください。結果画面がない場合はdetectedをfalseにしてください。
+結果画像では「人気」「オッズ」「払戻」を着順と混同しないでください。
 
 boatsは1号艇から6号艇の順に整理してください。
 
