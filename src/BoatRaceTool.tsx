@@ -1018,6 +1018,61 @@ function buildAdaptiveWeightProfile(races) {
   return { sampleSize: completed.length, active: true, weights, signals: uplifts };
 }
 
+function computeDetailedDiagnostics(races) {
+  const completed = (Array.isArray(races) ? races : []).filter(r => {
+    const lanes = parseResultLanes(r.result);
+    return lanes && lanes.length >= 3 && Array.isArray(r.boats) && r.boats.length > 0;
+  });
+  const counts = {
+    total: completed.length,
+    honmeiWin: 0,
+    honmeiTop3: 0,
+    top3BoxHit: 0,
+    straightHit: 0,
+    orderMiss: 0,
+    selectionMiss: 0,
+    honmeiLoss: 0,
+    betTracked: 0,
+    betHit: 0,
+  };
+  completed.forEach(r => {
+    const actual = parseResultLanes(r.result).slice(0, 3);
+    const byMark = {};
+    (r.boats || []).forEach(b => { if (b.mark) byMark[b.mark] = Number(b.lane); });
+    const picks = ['◎','○','▲'].map(m => byMark[m]).filter(Number.isFinite);
+    if (Number.isFinite(byMark['◎'])) {
+      if (actual[0] === byMark['◎']) counts.honmeiWin++;
+      else counts.honmeiLoss++;
+      if (actual.includes(byMark['◎'])) counts.honmeiTop3++;
+    }
+    if (picks.length === 3) {
+      const box = picks.every(l => actual.includes(l));
+      const straight = picks.every((l, i) => actual[i] === l);
+      if (box) counts.top3BoxHit++;
+      if (straight) counts.straightHit++;
+      if (box && !straight) counts.orderMiss++;
+      if (!box) counts.selectionMiss++;
+    }
+    if (Array.isArray(r.bets) && r.bets.length) {
+      counts.betTracked++;
+      const combo = actual.join('-');
+      if (r.bets.some(b => b && b.combo === combo)) counts.betHit++;
+    }
+  });
+  const rate = (n, d=counts.total) => d ? Math.round(n / d * 1000) / 10 : null;
+  return {
+    ...counts,
+    honmeiWinRate: rate(counts.honmeiWin),
+    honmeiTop3Rate: rate(counts.honmeiTop3),
+    top3BoxRate: rate(counts.top3BoxHit),
+    straightRate: rate(counts.straightHit),
+    orderMissRate: rate(counts.orderMiss),
+    selectionMissRate: rate(counts.selectionMiss),
+    honmeiLossRate: rate(counts.honmeiLoss),
+    betHitRate: rate(counts.betHit, counts.betTracked),
+  };
+}
+
 function computeVenueStats(races) {
   const byVenue = {};
   races.forEach(r => {
@@ -1819,7 +1874,7 @@ setForecast(generateForecast(scored));
   const handleComputeStats = async () => {
     setStatsLoading(true);
     const all = await loadAllRaces();
-    setStatsResult({ mark: computeMarkStats(all), trifecta: computeTrifectaStats(all), byVenue: computeVenueStats(all) });
+    setStatsResult({ mark: computeMarkStats(all), trifecta: computeTrifectaStats(all), diagnostics: computeDetailedDiagnostics(all), byVenue: computeVenueStats(all) });
     setStatsLoading(false);
   };
 
@@ -2466,6 +2521,29 @@ setForecast(generateForecast(scored));
                       <div style={{ fontSize: 16, fontWeight: 700, color: '#7aff9b' }}>{statsResult.trifecta.betsHitRate}%</div>
                     </div>
                   )}
+                </div>
+              )}
+
+              {statsResult.diagnostics && statsResult.diagnostics.total > 0 && (
+                <div style={{ background:'#111d2b', border:'1px solid #2a3d52', borderRadius:8, padding:12, margin:'0 0 12px' }}>
+                  <div style={{ fontSize:13, fontWeight:900, color:'#7aa6e8', marginBottom:8 }}>🔎 3連単ミス診断</div>
+                  <div style={{ fontSize:10, color:'#8ba3bd', lineHeight:1.5, marginBottom:9 }}>
+                    結果入力済み{statsResult.diagnostics.total}件を「軸」「相手選び」「着順」のどこで外したかに分解。保存済みデータは変更せず集計だけ行います。
+                  </div>
+                  <div style={{ display:'grid', gridTemplateColumns:'repeat(2,1fr)', gap:7 }}>
+                    <div style={{ background:'#0f1a28', borderRadius:6, padding:8 }}><div style={{fontSize:10,color:'#8ba3bd'}}>◎1着</div><div style={{fontSize:16,fontWeight:900,color:'#52d273'}}>{statsResult.diagnostics.honmeiWinRate}%</div></div>
+                    <div style={{ background:'#0f1a28', borderRadius:6, padding:8 }}><div style={{fontSize:10,color:'#8ba3bd'}}>◎3着内</div><div style={{fontSize:16,fontWeight:900,color:'#7aa6e8'}}>{statsResult.diagnostics.honmeiTop3Rate}%</div></div>
+                    <div style={{ background:'#0f1a28', borderRadius:6, padding:8 }}><div style={{fontSize:10,color:'#8ba3bd'}}>相手選びミス</div><div style={{fontSize:16,fontWeight:900,color:'#ff9b6b'}}>{statsResult.diagnostics.selectionMissRate}%</div><div style={{fontSize:9,color:'#71869b'}}>◎○▲の誰かが3着外</div></div>
+                    <div style={{ background:'#0f1a28', borderRadius:6, padding:8 }}><div style={{fontSize:10,color:'#8ba3bd'}}>着順だけミス</div><div style={{fontSize:16,fontWeight:900,color:'#e8b800'}}>{statsResult.diagnostics.orderMissRate}%</div><div style={{fontSize:9,color:'#71869b'}}>3艇は合っているが順番違い</div></div>
+                  </div>
+                  <div style={{ marginTop:9, fontSize:11, color:'#c5d3e0', lineHeight:1.6 }}>
+                    {statsResult.diagnostics.selectionMissRate > statsResult.diagnostics.orderMissRate
+                      ? '判定: 現状は「着順」より「3艇の選び方」の改善余地が大きめです。'
+                      : statsResult.diagnostics.orderMissRate > 0
+                        ? '判定: 上位3艇を拾えているレースでは、着順組み立ての改善余地が大きめです。'
+                        : '判定: まず結果件数を増やして傾向を確認します。'}
+                  </div>
+                  {statsResult.diagnostics.betTracked > 0 && <div style={{marginTop:6,fontSize:10,color:'#8ba3bd'}}>実買い目追跡: {statsResult.diagnostics.betTracked}件 / 的中 {statsResult.diagnostics.betHit}件 ({statsResult.diagnostics.betHitRate}%)</div>}
                 </div>
               )}
 
