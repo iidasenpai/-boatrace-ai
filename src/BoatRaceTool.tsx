@@ -164,10 +164,32 @@ function permutations3(indices) {
   return out;
 }
 
-function generateBets(boats, betType, budgetYen) {
+function generateBets(boats, betType, budgetYen, selectionProfile = null) {
   const isChaosRace = boats.some(b => b.isChaosRace);
   const poolSize = isChaosRace ? 6 : 5;
   const candidates = boats.slice(0, Math.min(poolSize, boats.length));
+
+  // 2・3着の相手選びを、保存済みレースから学んだ補助プロファイルで微調整する。
+  // 1着軸の強さ(total)は従来ロジックを維持し、相手候補だけ最大±18%に制限して過学習を防ぐ。
+  const companionMultiplier = (boat) => {
+    if (!selectionProfile?.active || !selectionProfile?.weights) return 1;
+    const featureMap = {
+      total: 'total', player: 'playerScore', gear: 'gearScore', course: 'courseScore',
+      exhibition: 'exScore', start: 'stScore', class: 'classScore',
+    };
+    let weighted = 0; let weightSum = 0;
+    Object.entries(featureMap).forEach(([name, field]) => {
+      const value = Number(boat?.[field]);
+      const w = Number(selectionProfile.weights?.[name] ?? 1);
+      if (!Number.isFinite(value)) return;
+      weighted += value * w; weightSum += w;
+    });
+    if (!weightSum) return 1;
+    const score = weighted / weightSum;
+    const strength = Math.max(0, Math.min(1, Number(selectionProfile.strength ?? 0)));
+    return Math.max(0.82, Math.min(1.18, 1 + ((score - 50) / 100) * 0.36 * strength));
+  };
+
   const weights = candidates.map(b => Math.exp(b.total / 12));
   const sumAll = weights.reduce((a, c) => a + c, 0);
   const idx = candidates.map((_, i) => i);
@@ -177,7 +199,8 @@ function generateBets(boats, betType, budgetYen) {
     const p1 = weights[i] / sumAll;
     const p2 = weights[j] / (sumAll - weights[i]);
     const p3 = weights[k] / (sumAll - weights[i] - weights[j]);
-    const prob = p1 * p2 * p3;
+    const learnedBoost = companionMultiplier(candidates[j]) * companionMultiplier(candidates[k]);
+    const prob = p1 * p2 * p3 * learnedBoost;
     return { lanes: [candidates[i].lane, candidates[j].lane, candidates[k].lane], prob };
   });
 
@@ -887,7 +910,11 @@ async function loadAllRaces() {
         }
       } catch (e) { /* この会場のデータはスキップ */ }
     }
-    return all;
+    return all.sort((a, b) => {
+      const ta = Date.parse(a.savedAt || '') || Number(a.id || 0);
+      const tb = Date.parse(b.savedAt || '') || Number(b.id || 0);
+      return tb - ta;
+    });
   } catch (e) {
     return [];
   }
@@ -980,42 +1007,157 @@ function computeTrifectaStats(races) {
 // (2)は印の良し悪しとは無関係に「その水面で実際何コースが強いか」を直接見られるので、
 // COURSE_BASE(全国平均想定の固定値)が会場に合っているかどうかの一番直接的な検証になる。
 
+
+function buildOpponentSelectionProfile(allRaces, venue) {
+  const completed = (Array.isArray(allRaces) ? allRaces : []).filter(r => {
+    const lanes = parseResultLanes(r.result);
+    return lanes?.length >= 3 && Array.isArray(r.boats) && r.boats.length >= 4;
+  });
+  const venueCompleted = completed.filter(r => (r.venue || '') === venue);
+  const featureMap = {
+    total: 'total', player: 'playerScore', gear: 'gearScore', course: 'courseScore',
+    exhibition: 'exScore', start: 'stScore', class: 'classScore',
+  };
+
+  const derive = (source) => {
+    const weights = {};
+    for (const [name, field] of Object.entries(featureMap)) {
+      const hit = [], miss = [];
+      source.forEach(r => {
+        const actual = new Set(parseResultLanes(r.result).slice(0, 3));
+        const axis = [...r.boats].sort((a,b)=>Number(b.total||0)-Number(a.total||0))[0]?.lane;
+        r.boats.forEach(b => {
+          if (Number(b.lane) === Number(axis)) return;
+          const v = Number(b[field]);
+          if (!Number.isFinite(v)) return;
+          (actual.has(Number(b.lane)) ? hit : miss).push(v);
+        });
+      });
+      const avg = arr => arr.length ? arr.reduce((a,b)=>a+b,0)/arr.length : 50;
+      const uplift = avg(hit) - avg(miss);
+      weights[name] = Math.max(0.88, Math.min(1.12, 1 + uplift / 80));
+    }
+    return weights;
+  };
+
+  const globalWeights = derive(completed);
+  const venueWeights = venueCompleted.length >= 20 ? derive(venueCompleted) : globalWeights;
+  const venueBlend = venueCompleted.length < 20 ? 0 : Math.min(0.55, (venueCompleted.length - 20) / 80);
+  const weights = {};
+  Object.keys(featureMap).forEach(key => {
+    weights[key] = globalWeights[key] * (1 - venueBlend) + venueWeights[key] * venueBlend;
+  });
+
+  const globalStrength = completed.length < 50 ? 0 : Math.min(1, (completed.length - 40) / 120);
+  const strength = Math.max(0, Math.min(1, globalStrength * (0.75 + venueBlend * 0.25)));
+  return {
+    active: completed.length >= 50,
+    sampleSize: completed.length,
+    venueSampleSize: venueCompleted.length,
+    strength,
+    weights,
+  };
+}
+
+function compareOpponentSelectionAlgorithms(allRaces, venue, currentProfile) {
+  const completed = (Array.isArray(allRaces) ? allRaces : []).filter(r => {
+    const lanes = parseResultLanes(r.result);
+    return lanes?.length >= 3 && Array.isArray(r.boats) && r.boats.length >= 4;
+  });
+  // 過学習防止: 最新20件を検証用に取り置き、それ以前だけから相手選びプロファイルを作る。
+  const validation = completed.slice(0, Math.min(20, completed.length));
+  const training = completed.slice(validation.length);
+  const validationProfile = training.length >= 50
+    ? buildOpponentSelectionProfile(training, venue)
+    : { ...currentProfile, active: false };
+
+  let tracked = 0, oldHit = 0, newHit = 0;
+  validation.forEach(r => {
+    const actual = parseResultLanes(r.result).slice(0, 3).join('-');
+    const oldBets = Array.isArray(r.bets) ? r.bets.filter(b => b?.combo) : [];
+    if (!oldBets.length) return;
+    tracked++;
+    if (oldBets.some(b => b.combo === actual)) oldHit++;
+    const count = Math.max(1, Math.min(6, oldBets.length));
+    const learned = generateBets(r.boats, '3連単', Math.max(300, Number(r.stakeYen) || 500), validationProfile)
+      .slice(0, count);
+    if (learned.some(b => b.combo === actual)) newHit++;
+  });
+  const oldRate = tracked ? Math.round(oldHit / tracked * 1000) / 10 : null;
+  const newRate = tracked ? Math.round(newHit / tracked * 1000) / 10 : null;
+  const enough = tracked >= 10 && training.length >= 50;
+  // 新ロジックが検証区間で旧ロジックより明確に悪ければ自動ロールバック。
+  const rollback = enough && oldRate != null && newRate != null && newRate + 0.5 < oldRate;
+  return {
+    sampleSize: tracked,
+    trainingSize: training.length,
+    oldRate,
+    newRate,
+    rollback,
+    useNew: currentProfile.active && (!enough || !rollback),
+    validationReady: enough,
+  };
+}
+
 function buildAdaptiveWeightProfile(races) {
   const completed = (Array.isArray(races) ? races : []).filter(r => {
     const lanes = parseResultLanes(r.result);
     return lanes?.length >= 1 && Array.isArray(r.boats) && r.boats.length >= 4;
   });
   const featureMap = {
-    player: 'playerScore',
-    gear: 'gearScore',
-    course: 'courseScore',
-    exhibition: 'exScore',
-    start: 'stScore',
-    class: 'classScore',
+    player: 'playerScore', gear: 'gearScore', course: 'courseScore',
+    exhibition: 'exScore', start: 'stScore', class: 'classScore',
   };
   const neutral = Object.fromEntries(Object.keys(featureMap).map(k => [k, 1]));
-  if (completed.length < 20) return { sampleSize: completed.length, active: false, weights: neutral, signals: {} };
+  // 20件で±15%は過学習しやすかったため、30件未満は完全に学習表示だけにする。
+  if (completed.length < 30) return { sampleSize: completed.length, active: false, weights: neutral, signals: {}, cap: 0, rollback: false };
 
-  const uplifts = {};
-  for (const [name, field] of Object.entries(featureMap)) {
-    const diffs = [];
-    completed.forEach(r => {
-      const winnerLane = parseResultLanes(r.result)?.[0];
-      const winner = r.boats.find(b => Number(b.lane) === Number(winnerLane));
-      const values = r.boats.map(b => Number(b[field])).filter(Number.isFinite);
-      const winnerValue = Number(winner?.[field]);
-      if (!Number.isFinite(winnerValue) || values.length < 4) return;
-      const mean = values.reduce((a,b) => a+b, 0) / values.length;
-      diffs.push(winnerValue - mean);
+  // サンプル数に応じて補正上限を段階的に解放する。
+  const cap = completed.length < 50 ? 0.04 : completed.length < 100 ? 0.07 : completed.length < 200 ? 0.10 : 0.15;
+  const train = completed.length >= 50 ? completed.slice(20) : completed;
+  const validation = completed.length >= 50 ? completed.slice(0, 20) : [];
+
+  const deriveWeights = source => {
+    const uplifts = {};
+    for (const [name, field] of Object.entries(featureMap)) {
+      const diffs = [];
+      source.forEach(r => {
+        const winnerLane = parseResultLanes(r.result)?.[0];
+        const winner = r.boats.find(b => Number(b.lane) === Number(winnerLane));
+        const values = r.boats.map(b => Number(b[field])).filter(Number.isFinite);
+        const winnerValue = Number(winner?.[field]);
+        if (!Number.isFinite(winnerValue) || values.length < 4) return;
+        const mean = values.reduce((a,b) => a+b, 0) / values.length;
+        diffs.push(winnerValue - mean);
+      });
+      uplifts[name] = diffs.length ? diffs.reduce((a,b)=>a+b,0)/diffs.length : 0;
+    }
+    const absMax = Math.max(8, ...Object.values(uplifts).map(v => Math.abs(Number(v)||0)));
+    const weights = {};
+    Object.entries(uplifts).forEach(([name,uplift]) => {
+      weights[name] = Math.max(1-cap, Math.min(1+cap, 1 + (Number(uplift)/absMax)*cap));
     });
-    uplifts[name] = diffs.length ? diffs.reduce((a,b) => a+b,0) / diffs.length : 0;
+    return { weights, uplifts };
+  };
+
+  const learned = deriveWeights(train);
+  let rollback = false;
+  let neutralWin = null, learnedWin = null;
+  if (validation.length >= 20) {
+    const predict = (r, weights) => [...r.boats].sort((a,b) => {
+      const score = boat => Object.entries(featureMap).reduce((sum,[name,field]) => sum + (Number(boat[field])||50) * Number(weights[name]||1), 0);
+      return score(b) - score(a);
+    })[0]?.lane;
+    const hits = weights => validation.filter(r => predict(r,weights) === parseResultLanes(r.result)?.[0]).length;
+    const nHit = hits(neutral), lHit = hits(learned.weights);
+    neutralWin = Math.round(nHit / validation.length * 1000) / 10;
+    learnedWin = Math.round(lHit / validation.length * 1000) / 10;
+    rollback = learnedWin + 2 < neutralWin;
   }
-  const absMax = Math.max(8, ...Object.values(uplifts).map(v => Math.abs(Number(v) || 0)));
-  const weights = {};
-  Object.entries(uplifts).forEach(([name, uplift]) => {
-    weights[name] = Math.max(0.85, Math.min(1.15, 1 + (Number(uplift) / absMax) * 0.15));
-  });
-  return { sampleSize: completed.length, active: true, weights, signals: uplifts };
+  return {
+    sampleSize: completed.length, active: !rollback, weights: rollback ? neutral : learned.weights,
+    signals: learned.uplifts, cap, rollback, neutralWin, learnedWin,
+  };
 }
 
 function computeDetailedDiagnostics(races) {
@@ -1611,7 +1753,11 @@ export default function BoatRaceTool() {
   const [retryCountdown, setRetryCountdown] = useState(0);
   const [statsResult, setStatsResult] = useState(null);
   const [statsLoading, setStatsLoading] = useState(false);
+  const [allRaces, setAllRaces] = useState([]);
   const adaptiveProfile = useMemo(() => buildAdaptiveWeightProfile(races), [races]);
+  const opponentProfile = useMemo(() => buildOpponentSelectionProfile(allRaces, venue), [allRaces, venue]);
+  const opponentComparison = useMemo(() => compareOpponentSelectionAlgorithms(allRaces, venue, opponentProfile), [allRaces, venue, opponentProfile]);
+  const effectiveOpponentProfile = opponentComparison.useNew ? opponentProfile : { ...opponentProfile, active: false };
 
   const loadVenueData = useCallback(async (v) => {
     setLoading(true);
@@ -1619,10 +1765,18 @@ export default function BoatRaceTool() {
     const r = await loadJSON(`boatrace:races:${v}`, []);
     setMemo(m || '');
     setRaces(r || []);
+    setAllRaces(await loadAllRaces());
     setLoading(false);
   }, []);
 
   useEffect(() => { loadVenueData(venue); }, [venue, loadVenueData]);
+
+  const handleClearTexts = () => {
+    setRacelistText('');
+    setBeforeInfoText('');
+    setStartDispText('');
+    setStatus('テキスト入力3項目を一括クリアしました。保存済みレース・画像・解析結果は消していません。');
+  };
 
   const handleParse = () => {
     const rl = parseRacelist(racelistText);
@@ -1655,7 +1809,8 @@ export default function BoatRaceTool() {
   const generatedBets = generateBets(
     boats,
     betType,
-    budgetYen
+    budgetYen,
+    effectiveOpponentProfile
   );
 
   const evaluatedBets = addExpectedValueToBets(generatedBets, boats);
@@ -1735,6 +1890,7 @@ export default function BoatRaceTool() {
           };
           await saveJSON(`boatrace:races:${resultVenue}`, updatedSaved);
           if (resultVenue === venue) setRaces(updatedSaved);
+          setAllRaces(await loadAllRaces());
           setStatus(`結果 ${detectedResult.trifecta} を保存済みレースへ自動反映しました`);
         } else {
           setStatus(`結果 ${detectedResult.trifecta} を読み取りました。対応する保存済みレースが見つかりません`);
@@ -1759,7 +1915,7 @@ export default function BoatRaceTool() {
 
 const autoBets = rankAndAllocateBets(
   addExpectedValueToBets(
-    generateBets(scored, betType, budgetYen),
+    generateBets(scored, betType, budgetYen, effectiveOpponentProfile),
     scored
   ),
   scored,
@@ -1844,10 +2000,12 @@ setForecast(generateForecast(scored));
       // これがあれば「◎○▲の並び」だけでなく「実際に提示した買い目が当たったか」も後から検証できる。
       bets: bets || null,
       betType: bets ? betType : null,
+      predictionVersion: 'opponent-v2',
+      opponentLearningUsed: Boolean(effectiveOpponentProfile.active),
     };
     const updated = [entry, ...races];
     const { ok, error } = await saveJSON(`boatrace:races:${venue}`, updated);
-    if (ok) { setRaces(updated); setStatus('レースを保存しました'); setSaveNote(''); }
+    if (ok) { setRaces(updated); setAllRaces(await loadAllRaces()); setStatus('レースを保存しました'); setSaveNote(''); }
     else setStatus(`保存に失敗しました: ${error}`);
   };
 
@@ -1855,6 +2013,7 @@ setForecast(generateForecast(scored));
     const updated = races.map(r => r.id === id ? { ...r, result: value } : r);
     setRaces(updated);
     await saveJSON(`boatrace:races:${venue}`, updated);
+    setAllRaces(await loadAllRaces());
   };
 
   const handleRaceMoneyChange = async (id, field, value) => {
@@ -1862,18 +2021,21 @@ setForecast(generateForecast(scored));
     const updated = races.map(r => r.id === id ? { ...r, [field]: amount } : r);
     setRaces(updated);
     await saveJSON(`boatrace:races:${venue}`, updated);
+    setAllRaces(await loadAllRaces());
   };
 
   const handleDeleteRace = async (id) => {
     const updated = races.filter(r => r.id !== id);
     setRaces(updated);
     await saveJSON(`boatrace:races:${venue}`, updated);
+    setAllRaces(await loadAllRaces());
     setStatus('削除しました');
   };
 
   const handleComputeStats = async () => {
     setStatsLoading(true);
     const all = await loadAllRaces();
+    setAllRaces(all);
     setStatsResult({ mark: computeMarkStats(all), trifecta: computeTrifectaStats(all), diagnostics: computeDetailedDiagnostics(all), byVenue: computeVenueStats(all) });
     setStatsLoading(false);
   };
@@ -1931,10 +2093,16 @@ setForecast(generateForecast(scored));
           </div>
         ))}
 
-        <button onClick={handleParse}
-          style={{ width: '100%', background: '#e8b800', color: '#111', border: 'none', borderRadius: 6, padding: '10px 0', fontWeight: 700, fontSize: 14, cursor: 'pointer', marginBottom: 8 }}>
-          解析する
-        </button>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 8, marginBottom: 8 }}>
+          <button onClick={handleParse}
+            style={{ width: '100%', background: '#e8b800', color: '#111', border: 'none', borderRadius: 6, padding: '10px 0', fontWeight: 700, fontSize: 14, cursor: 'pointer' }}>
+            解析する
+          </button>
+          <button onClick={handleClearTexts} disabled={!racelistText && !beforeInfoText && !startDispText}
+            style={{ background: '#23364a', color: (!racelistText && !beforeInfoText && !startDispText) ? '#60758a' : '#e8edf2', border: '1px solid #3b536b', borderRadius: 6, padding: '8px 12px', fontWeight: 700, fontSize: 11, cursor: (!racelistText && !beforeInfoText && !startDispText) ? 'default' : 'pointer', whiteSpace: 'nowrap' }}>
+            テキスト一括クリア
+          </button>
+        </div>
 
         {/* Image upload (vision) */}
         <div style={{ marginTop: 10, marginBottom: 16, borderTop: '1px solid #1c2b3d', paddingTop: 14 }}>
@@ -2128,7 +2296,7 @@ setForecast(generateForecast(scored));
                 </div>)}
                 <div style={{ background: '#0f1a28', borderRadius: 8, padding: '8px 9px' }}>
                   <div style={{ fontSize: 10, color: '#8ba3bd' }}>学習状況</div>
-                  <div style={{ fontSize: 12, fontWeight: 900, color: adaptiveProfile.active ? '#52d273' : '#8ba3bd' }}>{adaptiveProfile.active ? `補正ON ${adaptiveProfile.sampleSize}件` : `${adaptiveProfile.sampleSize}/20件`}</div>
+                  <div style={{ fontSize: 12, fontWeight: 900, color: adaptiveProfile.active ? '#52d273' : '#8ba3bd' }}>{adaptiveProfile.active ? `補正ON ${adaptiveProfile.sampleSize}件` : `${adaptiveProfile.sampleSize}/30件`}</div>
                 </div>
               </div>}
 
@@ -2601,11 +2769,24 @@ setForecast(generateForecast(scored));
         </div>
 
         <div style={{ marginTop: 22, background: '#111d2b', border: '1px solid #2a3d52', borderRadius: 10, padding: 14 }}>
+          <div style={{ fontSize: 14, fontWeight: 900, color: '#7aa6e8', marginBottom: 8 }}>🎯 相手選び学習・旧新比較</div>
+          <div style={{ fontSize: 11, color: '#8ba3bd', lineHeight: 1.6, marginBottom: 10 }}>
+            既存の保存データは変更せず、2・3着候補だけを学習補正します。全体50件以上で有効化し、過去成績が旧ロジックより悪化した場合は自動で旧ロジックへ戻します。
+          </div>
+          <div style={{ display:'grid', gridTemplateColumns:'repeat(2,1fr)', gap:8 }}>
+            <div style={{ background:'#0f1a28', borderRadius:8, padding:9 }}><div style={{fontSize:10,color:'#8ba3bd'}}>学習データ</div><div style={{fontSize:16,fontWeight:900}}>{opponentProfile.sampleSize}件</div><div style={{fontSize:9,color:'#71869b'}}>{venue} {opponentProfile.venueSampleSize}件 / 学習{opponentComparison.trainingSize}件</div></div>
+            <div style={{ background:'#0f1a28', borderRadius:8, padding:9 }}><div style={{fontSize:10,color:'#8ba3bd'}}>現在の状態</div><div style={{fontSize:16,fontWeight:900,color:opponentComparison.useNew?'#52d273':'#e8b800'}}>{opponentComparison.useNew ? '新ロジックON' : opponentComparison.rollback ? '自動ロールバック' : '検証中'}</div></div>
+            <div style={{ background:'#0f1a28', borderRadius:8, padding:9 }}><div style={{fontSize:10,color:'#8ba3bd'}}>旧ロジック的中</div><div style={{fontSize:16,fontWeight:900}}>{opponentComparison.oldRate ?? '-'}{opponentComparison.oldRate != null ? '%' : ''}</div></div>
+            <div style={{ background:'#0f1a28', borderRadius:8, padding:9 }}><div style={{fontSize:10,color:'#8ba3bd'}}>新ロジック再計算</div><div style={{fontSize:16,fontWeight:900,color:opponentComparison.newRate != null && (opponentComparison.oldRate == null || opponentComparison.newRate >= opponentComparison.oldRate)?'#52d273':'#ff9b6b'}}>{opponentComparison.newRate ?? '-'}{opponentComparison.newRate != null ? '%' : ''}</div><div style={{fontSize:9,color:'#71869b'}}>最新20件を検証用に分離</div></div>
+          </div>
+        </div>
+
+        <div style={{ marginTop: 22, background: '#111d2b', border: '1px solid #2a3d52', borderRadius: 10, padding: 14 }}>
           <div style={{ fontSize: 14, fontWeight: 900, color: adaptiveProfile.active ? '#52d273' : '#8ba3bd', marginBottom: 8 }}>⚙️ 自動学習補正</div>
           <div style={{ fontSize: 11, color: '#8ba3bd', lineHeight: 1.6, marginBottom: 10 }}>
             {adaptiveProfile.active
-              ? `${venue}の結果${adaptiveProfile.sampleSize}件から、基本ロジックを壊さない範囲(±15%)で予想ウェイトを自動補正中です。`
-              : `結果が20件たまると、${venue}専用のウェイト補正を自動開始します。現在${adaptiveProfile.sampleSize}/20件。`}
+              ? `${venue}の結果${adaptiveProfile.sampleSize}件から、サンプル数に応じた上限(現在±${Math.round((adaptiveProfile.cap||0)*100)}%)で補正中です。${adaptiveProfile.rollback ? ' 検証悪化を検知したため基本値へ自動ロールバック済み。' : ''}`
+              : `結果が30件たまると、${venue}専用補正を段階的に開始します。現在${adaptiveProfile.sampleSize}/30件。`}
           </div>
           {adaptiveProfile.active && <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6 }}>
             {[
@@ -2624,7 +2805,7 @@ setForecast(generateForecast(scored));
         <div style={{ marginTop: 12, background: '#111d2b', border: '1px solid #2a3d52', borderRadius: 10, padding: 14 }}>
           <div style={{ fontSize: 14, fontWeight: 900, color: '#e8b800', marginBottom: 8 }}>🧠 AI学習ログ</div>
           <div style={{ fontSize: 11, color: '#8ba3bd', lineHeight: 1.6, marginBottom: 10 }}>
-            保存レースに結果を入力すると、的中傾向を端末内に蓄積して検証できます。現時点では自動で予想係数を書き換えず、学習データとして安全に可視化します。
+            保存レースに結果を入力すると、的中傾向を端末内に蓄積して検証できます。予想補正はサンプル数に応じて段階的に解放し、検証成績が悪化した場合は自動で基本ロジックへ戻します。
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8 }}>
             <div style={{ background: '#0f1a28', borderRadius: 8, padding: 9 }}><div style={{ fontSize: 10, color: '#8ba3bd' }}>結果入力済み</div><div style={{ fontSize: 18, fontWeight: 900 }}>{learningSummary.total}件</div></div>
