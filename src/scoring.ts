@@ -346,209 +346,82 @@ export function computeScores(
   boats: BoatInput[],
   venueOrWeather?: string | WeatherInfo | null,
   maybeWeather?: WeatherInfo | null,
-  adaptiveWeights?: AdaptiveWeights | null,
+  _adaptiveWeights?: AdaptiveWeights | null,
 ): ScoredBoat[] {
-  // 旧呼び出し computeScores(boats, weather) と
-  // 新呼び出し computeScores(boats, venue, weather) の両方に対応。
-  const venue = typeof venueOrWeather === 'string' ? venueOrWeather : '';
-  const weather =
-    typeof venueOrWeather === 'string'
-      ? maybeWeather
-      : (venueOrWeather as WeatherInfo | null | undefined);
-
+  // 初期版ロジック復元モード。
+  // 会場別学習・自動ウェイト補正は「集計表示のみ」とし、予想本体には使わない。
+  // 旧呼び出し computeScores(boats, weather) / computeScores(boats, venue, weather) の両方に対応。
+  const weather = typeof venueOrWeather === 'string'
+    ? maybeWeather
+    : (venueOrWeather as WeatherInfo | null | undefined);
   if (!Array.isArray(boats) || boats.length === 0) return [];
 
-  const courseRates = getCourseRates(venue);
-
-  const natWinArr = boats.map(b => finiteNumber(b.natWin));
   const nat2Arr = boats.map(b => finiteNumber(b.nat2));
-  const locWinArr = boats.map(b => finiteNumber(b.locWin));
   const loc2Arr = boats.map(b => finiteNumber(b.loc2));
   const motor2Arr = boats.map(b => finiteNumber(b.motor2));
-  const motor3Arr = boats.map(b => finiteNumber(b.motor3));
   const boat2Arr = boats.map(b => finiteNumber(b.boat2));
-  const boat3Arr = boats.map(b => finiteNumber(b.boat3));
   const exTimeArr = boats.map(b => finiteNumber(b.exTime));
   const exSTArr = boats.map(b => finiteNumber(b.exST));
-  const avgSTArr = boats.map(b => finiteNumber(b.avgST));
-  const konsetsuSTArr = boats.map(b => finiteNumber(b.konsetsuAvgST));
-  const finishArr = boats.map(getAverageFinish);
-
-  const roughIndex = calculateRoughIndex(weather);
-  const isRoughWater = roughIndex >= 45;
 
   const exhibitFCount = boats.filter(b => b.exhibitF).length;
-  const fHoldCount = boats.filter(b => (finiteNumber(b.fCount) ?? 0) > 0).length;
-  const isChaosRace = exhibitFCount >= 3 || roughIndex >= 70;
-
+  const isChaosRace = exhibitFCount >= 4;
   const a1Boats = boats.filter(b => b.classG === 'A1');
 
-  const baseGearScores = boats.map(b =>
-    weightedAverage([
-      [norm(b.motor2, motor2Arr), 0.45],
-      [norm(b.motor3, motor3Arr), 0.20],
-      [norm(b.boat2, boat2Arr), 0.25],
-      [norm(b.boat3, boat3Arr), 0.10],
-    ]),
-  );
+  const windVal = finiteNumber(weather?.wind) ?? 0;
+  const waveVal = finiteNumber(weather?.wave) ?? 0;
+  const isRoughWater = windVal >= 5 || waveVal >= 3;
+  const roughIndex = calculateRoughIndex(weather);
 
-  const gearSorted = [...baseGearScores].sort((a, b) => b - a);
-  const topGear = gearSorted[0] ?? 50;
-  const secondGear = gearSorted[1] ?? 50;
+  // 初期版の固定ウェイトをそのまま復元。
+  const courseW = isRoughWater ? 0.18 : 0.30;
+  const playerW = isRoughWater ? 0.28 : 0.22;
+  const gearW = isRoughWater ? 0.24 : 0.20;
+  const exW = 0.15;
+  const classW = 0.15;
 
-  const baseRows = boats.map((boat, index) => {
-    const entryCourse = clamp(
-      Math.round(finiteNumber(boat.entryCourse) ?? boat.lane),
-      1,
-      6,
-    ) as 1 | 2 | 3 | 4 | 5 | 6;
-
-    const playerScore = weightedAverage([
-      [norm(boat.natWin, natWinArr), 0.25],
-      [norm(boat.nat2, nat2Arr), 0.30],
-      [norm(boat.locWin, locWinArr), 0.20],
-      [norm(boat.loc2, loc2Arr), 0.25],
-    ]);
-
-    let gearScore = baseGearScores[index];
-    if (boat.partsExchanged) gearScore -= 3;
-    gearScore = clamp(gearScore, 0, 100);
-
+  const rows = boats.map(boat => {
+    const entryCourse = clamp(Math.round(finiteNumber(boat.entryCourse) ?? boat.lane), 1, 6) as 1|2|3|4|5|6;
+    const playerScore = norm(boat.nat2, nat2Arr) * 0.5 + norm(boat.loc2, loc2Arr) * 0.5;
+    const gearScore = norm(boat.motor2, motor2Arr) * 0.6 + norm(boat.boat2, boat2Arr) * 0.4;
     const exScore = norm(boat.exTime, exTimeArr, true);
-
-    const actualSTScore = norm(boat.exST, exSTArr, true);
-    const normalSTScore = norm(boat.avgST, avgSTArr, true);
-    const currentSTScore = norm(boat.konsetsuAvgST, konsetsuSTArr, true);
-    const stScore = weightedAverage([
-      [actualSTScore, 0.55],
-      [normalSTScore, 0.25],
-      [currentSTScore, 0.20],
-    ]);
-
-    const courseScore = courseRates[entryCourse] * 100;
+    // 初期版では展示STは得点に入れない。UI表示・危険度表示のためだけに保持。
+    const stScore = norm(boat.exST, exSTArr, true);
+    const courseScore = (DEFAULT_COURSE_RATES[entryCourse] || 0.03) * 100;
     const classScore = CLASS_BASE[boat.classG || ''] ?? 30;
-
-    const avgFinish = finishArr[index];
-    let konsetsuScore: number | null = null;
-    let konsetsuBonus = 0;
-    if (avgFinish != null) {
-      konsetsuScore = norm(avgFinish, finishArr, true);
-      konsetsuBonus = (konsetsuScore - 50) * 0.14;
-    } else if (finiteNumber(boat.konsetsuAvgST) != null) {
-      konsetsuScore = currentSTScore;
-      konsetsuBonus = (currentSTScore - 50) * 0.05;
-    }
-
-    const isOuterAce =
-      boat.classG === 'A1' &&
-      entryCourse >= 4 &&
-      a1Boats.length === 1;
-
-    const isOuterGearAce =
-      entryCourse >= 4 &&
-      Math.abs(gearScore - topGear) < 0.0001 &&
-      gearScore >= 62 &&
-      topGear - secondGear >= 7;
 
     let fPenalty = 0;
     if (boat.exhibitF) {
-      fPenalty = entryCourse === 1 ? 7 : 16;
-      if (gearScore >= 70) fPenalty *= 0.7;
-      fPenalty *= Math.max(0.5, 1 - exhibitFCount * 0.09);
+      fPenalty = entryCourse === 1 ? 5 : 15;
+      if (gearScore >= 65) fPenalty *= 0.5;
+      fPenalty *= Math.max(0.4, 1 - exhibitFCount / 10);
     }
 
-    let startRiskPenalty = 0;
-    const fCount = finiteNumber(boat.fCount) ?? 0;
-    if (fCount > 0) startRiskPenalty += Math.min(8, fCount * 4);
-    if (stScore < 20) startRiskPenalty += 4;
-
-    const cleanStartBonus =
-      isChaosRace && !boat.exhibitF && stScore >= 55 ? 7 : 0;
-
-    const outerAceBonus = isOuterAce ? 7 : 0;
-    const outerGearBonus = isOuterGearAce ? 8 : 0;
+    const cleanStartBonus = isChaosRace && !boat.exhibitF ? 12 : 0;
+    const isOuterAce = boat.classG === 'A1' && entryCourse >= 4 && a1Boats.length === 1;
+    const outerAceBonus = isOuterAce ? 8 : 0;
 
     let tiltBonus = 0;
     const tilt = finiteNumber(boat.tilt);
     if (tilt != null) {
-      if (entryCourse === 1 && tilt < 0) tiltBonus = 4;
-      if (entryCourse >= 4 && tilt > 0) tiltBonus = 5;
-      if (entryCourse >= 5 && tilt >= 0.5) tiltBonus += 2;
+      if (entryCourse === 1 && tilt < 0) tiltBonus = 6;
+      else if (entryCourse >= 4 && tilt > 0) tiltBonus = 6;
     }
-
     const partsPenalty = boat.partsExchanged ? 2 : 0;
 
-    let weatherScore = 50;
-    if (isRoughWater) {
-      weatherScore = weightedAverage([
-        [playerScore, 0.40],
-        [gearScore, 0.40],
-        [stScore, 0.20],
-      ]);
-    }
-
-    // 保存済み結果が十分にある場合だけ、実測から得た穏やかな補正(0.85〜1.15)を適用する。
-    // 基本ロジックを壊さないよう、補正後も全ウェイトを再正規化する。
-    const baseWeights = {
-      course: isRoughWater ? 0.15 : 0.24,
-      player: isRoughWater ? 0.27 : 0.23,
-      gear: isRoughWater ? 0.25 : 0.22,
-      exhibition: 0.11,
-      start: isRoughWater ? 0.12 : 0.10,
-      class: 0.10,
-      weather: isRoughWater ? 0.05 : 0,
-    };
-    const adjusted = {
-      course: baseWeights.course * (adaptiveWeights?.course ?? 1),
-      player: baseWeights.player * (adaptiveWeights?.player ?? 1),
-      gear: baseWeights.gear * (adaptiveWeights?.gear ?? 1),
-      exhibition: baseWeights.exhibition * (adaptiveWeights?.exhibition ?? 1),
-      start: baseWeights.start * (adaptiveWeights?.start ?? 1),
-      class: baseWeights.class * (adaptiveWeights?.class ?? 1),
-      weather: baseWeights.weather,
-    };
-    const adjustedSum = Object.values(adjusted).reduce((a, b) => a + b, 0) || 1;
-    const scale = Object.values(baseWeights).reduce((a, b) => a + b, 0) / adjustedSum;
-    const courseWeight = adjusted.course * scale;
-    const playerWeight = adjusted.player * scale;
-    const gearWeight = adjusted.gear * scale;
-    const exWeight = adjusted.exhibition * scale;
-    const stWeight = adjusted.start * scale;
-    const classWeight = adjusted.class * scale;
-    const weatherWeight = adjusted.weather * scale;
-
     const rawTotal =
-      playerScore * playerWeight +
-      gearScore * gearWeight +
-      courseScore * courseWeight +
-      exScore * exWeight +
-      stScore * stWeight +
-      classScore * classWeight +
-      weatherScore * weatherWeight +
-      konsetsuBonus +
-      cleanStartBonus +
-      outerAceBonus +
-      outerGearBonus +
-      tiltBonus -
-      fPenalty -
-      startRiskPenalty -
-      partsPenalty;
+      playerScore * playerW +
+      gearScore * gearW +
+      courseScore * courseW +
+      exScore * exW +
+      classScore * classW -
+      fPenalty + cleanStartBonus + outerAceBonus + tiltBonus - partsPenalty;
 
     const danger = calculateDanger(boat, {
-      gearScore,
-      exScore,
-      stScore,
-      courseScore,
-      classScore,
-      roughIndex,
+      gearScore, exScore, stScore, courseScore, classScore, roughIndex,
     });
-
     const target = calculateTarget(boat, {
-      gearScore,
-      exScore,
-      stScore,
-      classScore,
-      isOuterGearAce,
+      gearScore, exScore, stScore, classScore,
+      isOuterGearAce: false,
       isOuterAce,
     });
 
@@ -561,18 +434,18 @@ export function computeScores(
       stScore: round1(stScore),
       courseScore: round1(courseScore),
       classScore: round1(classScore),
-      weatherScore: round1(weatherScore),
+      weatherScore: 50,
       fPenalty: round1(fPenalty),
-      startRiskPenalty: round1(startRiskPenalty),
+      startRiskPenalty: 0,
       cleanStartBonus: round1(cleanStartBonus),
       outerAceBonus: round1(outerAceBonus),
-      outerGearBonus: round1(outerGearBonus),
-      isOuterGearAce,
+      outerGearBonus: 0,
+      isOuterGearAce: false,
       tiltBonus: round1(tiltBonus),
       partsPenalty: round1(partsPenalty),
-      konsetsuScore: konsetsuScore == null ? null : round1(konsetsuScore),
-      konsetsuBonus: round1(konsetsuBonus),
-      konsetsuAvgFinish: avgFinish,
+      konsetsuScore: null,
+      konsetsuBonus: 0,
+      konsetsuAvgFinish: getAverageFinish(boat),
       rawTotal,
       dangerScore: danger.score,
       dangerReasons: danger.reasons,
@@ -585,77 +458,29 @@ export function computeScores(
     };
   });
 
-  const rawValues = baseRows.map(b => b.rawTotal);
-  const shares = softmax(rawValues, isChaosRace ? 13 : 10);
-  const sortedRaw = [...rawValues].sort((a, b) => b - a);
-  const topGap = (sortedRaw[0] ?? 0) - (sortedRaw[1] ?? 0);
-  const scoreSpread = standardDeviation(rawValues);
+  const rawValues = rows.map(b => b.rawTotal);
+  const shares = softmax(rawValues, 12);
+  const sorted = [...rawValues].sort((a,b)=>b-a);
+  const topGap = (sorted[0] ?? 0) - (sorted[1] ?? 0);
+  const spread = standardDeviation(rawValues);
+  const missingFields = boats.reduce((sum,b)=>sum + [b.nat2,b.loc2,b.motor2,b.boat2,b.exTime].filter(v=>finiteNumber(v)==null).length,0);
+  const completeness = 1 - missingFields / Math.max(1, boats.length * 5);
+  const raceConfidence = clamp(round1(48 + clamp(topGap*3.4,0,24) + clamp(spread*1.1,0,12) + completeness*14 - roughIndex*0.12 - exhibitFCount*2.5), 20, 95);
+  const chaosIndex = clamp(round1(roughIndex*0.5 + exhibitFCount*10 + clamp(10-topGap*1.8,0,10)),0,100);
+  const chaosStars = clamp(Math.ceil(chaosIndex/20),1,5);
 
-  const missingFields = boats.reduce((sum, b) => {
-    const values = [b.nat2, b.loc2, b.motor2, b.boat2, b.exTime, b.exST];
-    return sum + values.filter(v => finiteNumber(v) == null).length;
-  }, 0);
-  const completeness = 1 - missingFields / Math.max(1, boats.length * 6);
-
-  let raceConfidence =
-    46 +
-    clamp(topGap * 3.2, 0, 24) +
-    clamp(scoreSpread * 1.3, 0, 14) +
-    completeness * 15 -
-    roughIndex * 0.13 -
-    exhibitFCount * 3.5 -
-    fHoldCount * 1.2;
-
-  raceConfidence = clamp(round1(raceConfidence), 20, 95);
-
-  let chaosIndex =
-    roughIndex * 0.45 +
-    exhibitFCount * 12 +
-    fHoldCount * 4 +
-    clamp(12 - topGap * 2, 0, 12) +
-    clamp(8 - scoreSpread, 0, 8);
-
-  chaosIndex = clamp(round1(chaosIndex), 0, 100);
-  const chaosStars = clamp(Math.ceil(chaosIndex / 20), 1, 5);
-
-  const ranked = baseRows
-    .map((boat, index) => ({
-      ...boat,
-      // rawTotalを保持しつつ微小な決定的タイブレークを加える。
-      // 同点時はコース適性→展示→艇番の順で順位を確定する。
-      total: round1(
-        boat.rawTotal +
-        boat.courseScore * 0.0008 +
-        boat.exScore * 0.0004 +
-        (7 - Number(boat.lane || 7)) * 0.0001
-      ),
-      winShare: round1(shares[index] * 100),
-      confidence: clamp(
-        round1(
-          raceConfidence +
-          (shares[index] * 100 - 16.7) * 0.8 -
-          boat.dangerScore * 0.18,
-        ),
-        10,
-        98,
-      ),
-      raceConfidence,
-      raceConfidenceLabel: raceConfidenceLabel(raceConfidence),
-      chaosIndex,
-      chaosStars,
-    }))
-    .sort((a, b) =>
-      b.total - a.total ||
-      b.courseScore - a.courseScore ||
-      b.exScore - a.exScore ||
-      a.lane - b.lane
-    );
-
-  const marks = ['◎', '○', '▲', '△', '△', '△'];
-
-  return ranked.map((boat, index) => ({
+  const ranked = rows.map((boat,index)=>({
     ...boat,
-    mark: marks[index],
-    rank: index + 1,
-  })) as ScoredBoat[];
+    total: round1(boat.rawTotal + boat.courseScore*0.0008 + boat.exScore*0.0004 + (7-Number(boat.lane||7))*0.0001),
+    winShare: round1(shares[index]*100),
+    confidence: clamp(round1(raceConfidence + (shares[index]*100-16.7)*0.7 - boat.dangerScore*0.15),10,98),
+    raceConfidence,
+    raceConfidenceLabel: raceConfidenceLabel(raceConfidence),
+    chaosIndex,
+    chaosStars,
+  })).sort((a,b)=>b.total-a.total || b.courseScore-a.courseScore || b.exScore-a.exScore || a.lane-b.lane);
+
+  const marks=['◎','○','▲','△','△','△'];
+  return ranked.map((boat,index)=>({...boat, mark:marks[index], rank:index+1})) as ScoredBoat[];
 }
+

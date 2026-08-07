@@ -164,32 +164,10 @@ function permutations3(indices) {
   return out;
 }
 
-function generateBets(boats, betType, budgetYen, selectionProfile = null) {
+function generateBets(boats, betType, budgetYen, _selectionProfile = null) {
   const isChaosRace = boats.some(b => b.isChaosRace);
   const poolSize = isChaosRace ? 6 : 5;
   const candidates = boats.slice(0, Math.min(poolSize, boats.length));
-
-  // 2・3着の相手選びを、保存済みレースから学んだ補助プロファイルで微調整する。
-  // 1着軸の強さ(total)は従来ロジックを維持し、相手候補だけ最大±18%に制限して過学習を防ぐ。
-  const companionMultiplier = (boat) => {
-    if (!selectionProfile?.active || !selectionProfile?.weights) return 1;
-    const featureMap = {
-      total: 'total', player: 'playerScore', gear: 'gearScore', course: 'courseScore',
-      exhibition: 'exScore', start: 'stScore', class: 'classScore',
-    };
-    let weighted = 0; let weightSum = 0;
-    Object.entries(featureMap).forEach(([name, field]) => {
-      const value = Number(boat?.[field]);
-      const w = Number(selectionProfile.weights?.[name] ?? 1);
-      if (!Number.isFinite(value)) return;
-      weighted += value * w; weightSum += w;
-    });
-    if (!weightSum) return 1;
-    const score = weighted / weightSum;
-    const strength = Math.max(0, Math.min(1, Number(selectionProfile.strength ?? 0)));
-    return Math.max(0.82, Math.min(1.18, 1 + ((score - 50) / 100) * 0.36 * strength));
-  };
-
   const weights = candidates.map(b => Math.exp(b.total / 12));
   const sumAll = weights.reduce((a, c) => a + c, 0);
   const idx = candidates.map((_, i) => i);
@@ -199,8 +177,7 @@ function generateBets(boats, betType, budgetYen, selectionProfile = null) {
     const p1 = weights[i] / sumAll;
     const p2 = weights[j] / (sumAll - weights[i]);
     const p3 = weights[k] / (sumAll - weights[i] - weights[j]);
-    const learnedBoost = companionMultiplier(candidates[j]) * companionMultiplier(candidates[k]);
-    const prob = p1 * p2 * p3 * learnedBoost;
+    const prob = p1 * p2 * p3;
     return { lanes: [candidates[i].lane, candidates[j].lane, candidates[k].lane], prob };
   });
 
@@ -251,6 +228,7 @@ function generateBets(boats, betType, budgetYen, selectionProfile = null) {
 
   return result;
 }
+
 
 function normalizeOddsValue(value) {
   if (
@@ -1757,7 +1735,7 @@ export default function BoatRaceTool() {
   const adaptiveProfile = useMemo(() => buildAdaptiveWeightProfile(races), [races]);
   const opponentProfile = useMemo(() => buildOpponentSelectionProfile(allRaces, venue), [allRaces, venue]);
   const opponentComparison = useMemo(() => compareOpponentSelectionAlgorithms(allRaces, venue, opponentProfile), [allRaces, venue, opponentProfile]);
-  const effectiveOpponentProfile = opponentComparison.useNew ? opponentProfile : { ...opponentProfile, active: false };
+  const effectiveOpponentProfile = { ...opponentProfile, active: false }; // 初期版固定: 相手選び学習は集計のみ
 
   const loadVenueData = useCallback(async (v) => {
     setLoading(true);
@@ -2000,7 +1978,7 @@ setForecast(generateForecast(scored));
       // これがあれば「◎○▲の並び」だけでなく「実際に提示した買い目が当たったか」も後から検証できる。
       bets: bets || null,
       betType: bets ? betType : null,
-      predictionVersion: 'opponent-v2',
+      predictionVersion: 'initial-core-v1',
       opponentLearningUsed: Boolean(effectiveOpponentProfile.active),
     };
     const updated = [entry, ...races];
@@ -2769,24 +2747,22 @@ setForecast(generateForecast(scored));
         </div>
 
         <div style={{ marginTop: 22, background: '#111d2b', border: '1px solid #2a3d52', borderRadius: 10, padding: 14 }}>
-          <div style={{ fontSize: 14, fontWeight: 900, color: '#7aa6e8', marginBottom: 8 }}>🎯 相手選び学習・旧新比較</div>
+          <div style={{ fontSize: 14, fontWeight: 900, color: '#7aa6e8', marginBottom: 8 }}>🎯 初期ロジック復元モード</div>
           <div style={{ fontSize: 11, color: '#8ba3bd', lineHeight: 1.6, marginBottom: 10 }}>
-            既存の保存データは変更せず、2・3着候補だけを学習補正します。全体50件以上で有効化し、過去成績が旧ロジックより悪化した場合は自動で旧ロジックへ戻します。
+            初期版の固定スコア＋Plackett-Luce買い目生成を予想本体に使用します。保存データと学習集計は残しますが、会場補正・相手選び補正は予想へ反映しません。
           </div>
           <div style={{ display:'grid', gridTemplateColumns:'repeat(2,1fr)', gap:8 }}>
             <div style={{ background:'#0f1a28', borderRadius:8, padding:9 }}><div style={{fontSize:10,color:'#8ba3bd'}}>学習データ</div><div style={{fontSize:16,fontWeight:900}}>{opponentProfile.sampleSize}件</div><div style={{fontSize:9,color:'#71869b'}}>{venue} {opponentProfile.venueSampleSize}件 / 学習{opponentComparison.trainingSize}件</div></div>
-            <div style={{ background:'#0f1a28', borderRadius:8, padding:9 }}><div style={{fontSize:10,color:'#8ba3bd'}}>現在の状態</div><div style={{fontSize:16,fontWeight:900,color:opponentComparison.useNew?'#52d273':'#e8b800'}}>{opponentComparison.useNew ? '新ロジックON' : opponentComparison.rollback ? '自動ロールバック' : '検証中'}</div></div>
+            <div style={{ background:'#0f1a28', borderRadius:8, padding:9 }}><div style={{fontSize:10,color:'#8ba3bd'}}>現在の状態</div><div style={{fontSize:16,fontWeight:900,color:opponentComparison.useNew?'#52d273':'#e8b800'}}>{'初期ロジック固定'}</div></div>
             <div style={{ background:'#0f1a28', borderRadius:8, padding:9 }}><div style={{fontSize:10,color:'#8ba3bd'}}>旧ロジック的中</div><div style={{fontSize:16,fontWeight:900}}>{opponentComparison.oldRate ?? '-'}{opponentComparison.oldRate != null ? '%' : ''}</div></div>
             <div style={{ background:'#0f1a28', borderRadius:8, padding:9 }}><div style={{fontSize:10,color:'#8ba3bd'}}>新ロジック再計算</div><div style={{fontSize:16,fontWeight:900,color:opponentComparison.newRate != null && (opponentComparison.oldRate == null || opponentComparison.newRate >= opponentComparison.oldRate)?'#52d273':'#ff9b6b'}}>{opponentComparison.newRate ?? '-'}{opponentComparison.newRate != null ? '%' : ''}</div><div style={{fontSize:9,color:'#71869b'}}>最新20件を検証用に分離</div></div>
           </div>
         </div>
 
         <div style={{ marginTop: 22, background: '#111d2b', border: '1px solid #2a3d52', borderRadius: 10, padding: 14 }}>
-          <div style={{ fontSize: 14, fontWeight: 900, color: adaptiveProfile.active ? '#52d273' : '#8ba3bd', marginBottom: 8 }}>⚙️ 自動学習補正</div>
+          <div style={{ fontSize: 14, fontWeight: 900, color: adaptiveProfile.active ? '#52d273' : '#8ba3bd', marginBottom: 8 }}>⚙️ 学習データ（記録のみ）</div>
           <div style={{ fontSize: 11, color: '#8ba3bd', lineHeight: 1.6, marginBottom: 10 }}>
-            {adaptiveProfile.active
-              ? `${venue}の結果${adaptiveProfile.sampleSize}件から、サンプル数に応じた上限(現在±${Math.round((adaptiveProfile.cap||0)*100)}%)で補正中です。${adaptiveProfile.rollback ? ' 検証悪化を検知したため基本値へ自動ロールバック済み。' : ''}`
-              : `結果が30件たまると、${venue}専用補正を段階的に開始します。現在${adaptiveProfile.sampleSize}/30件。`}
+            {`${venue}の結果${adaptiveProfile.sampleSize}件を集計中。初期ロジック復元モードでは、この補正値は予想スコアへ反映しません。`}
           </div>
           {adaptiveProfile.active && <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6 }}>
             {[
