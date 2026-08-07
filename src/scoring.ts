@@ -142,9 +142,9 @@ export const VENUE_COURSE_RATES: Record<string, CourseRates> = {
 
 const CLASS_BASE: Record<string, number> = {
   A1: 100,
-  A2: 68,
-  B1: 36,
-  B2: 12,
+  A2: 66,
+  B1: 33,
+  B2: 10,
 };
 
 function finiteNumber(value: unknown): number | null {
@@ -166,23 +166,15 @@ export function norm(
   values: Array<number | null | undefined>,
   invert = false,
 ): number {
+  // 初期版そのまま: レース内の最小値=0、最大値=100の単純min-max正規化。
   const v = finiteNumber(value);
-  const clean = values
-    .map(finiteNumber)
-    .filter((x): x is number => x != null);
-
-  if (v == null || clean.length < 2) return 50;
-
-  const sorted = [...clean].sort((a, b) => a - b);
-  const low = sorted[Math.floor((sorted.length - 1) * 0.1)];
-  const high = sorted[Math.ceil((sorted.length - 1) * 0.9)];
-
-  if (high === low) return 50;
-
-  const percentile = clamp(((v - low) / (high - low)) * 100, 0, 100);
-  const oriented = invert ? 100 - percentile : percentile;
-  // 1レース6艇の相対比較で0/100が乱発しないよう、実用域へ平滑化する。
-  return 12 + oriented * 0.76;
+  const clean = values.map(finiteNumber).filter((x): x is number => x != null);
+  if (v == null || clean.length === 0) return 50;
+  const min = Math.min(...clean);
+  const max = Math.max(...clean);
+  if (max === min) return 50;
+  const score = ((v - min) / (max - min)) * 100;
+  return invert ? 100 - score : score;
 }
 
 function weightedAverage(parts: Array<[number, number]>): number {

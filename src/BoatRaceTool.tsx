@@ -1589,16 +1589,10 @@ function getRaceSummary(boats) {
     topExScore: Number(top.exScore || 0),
     topStScore: Number(top.stScore || 0),
     bestBoat: top,
-    // 本命と危険艇が同じになる矛盾を避ける。危険材料が弱い場合は表示しない。
-    dangerBoat: [...boats]
-      .filter(b => b.lane !== top.lane && Number(b.dangerScore || 0) >= 8)
-      .sort((a, b) =>
-        Number(b.dangerScore || 0) - Number(a.dangerScore || 0) ||
-        Number(b.rank || 99) - Number(a.rank || 99)
-      )[0] || null,
-    targetBoat: [...boats]
-      .filter(b => b.lane !== top.lane)
-      .sort((a, b) => (b.targetScore || 0) - (a.targetScore || 0))[0] || null,
+    // 初期ロジックの順位を唯一の基準にする。
+    // 狙い艇=本命以外で最上位、危険艇=最下位。必ず別艇になる。
+    targetBoat: boats.length >= 2 ? boats[1] : null,
+    dangerBoat: boats.length >= 3 ? boats[boats.length - 1] : null,
   };
 }
 
@@ -1768,7 +1762,7 @@ export default function BoatRaceTool() {
     }
     const merged = mergeBoats(rl, bi, sd);
     const normalizedWeather = normalizeWeather(sd ? sd.weather : null);
-    const scored = computeScores(merged, venue, normalizedWeather, adaptiveProfile.weights);
+    const scored = computeScores(merged, normalizedWeather);
     setBoats(scored);
     setWeather(normalizedWeather);
     setBets(null);
@@ -1784,15 +1778,10 @@ export default function BoatRaceTool() {
   const handleGenerateBets = () => {
   if (!boats) return;
 
-  const generatedBets = generateBets(
-    boats,
-    betType,
-    budgetYen,
-    effectiveOpponentProfile
-  );
-
-  const evaluatedBets = addExpectedValueToBets(generatedBets, boats);
-  setBets(rankAndAllocateBets(evaluatedBets, boats, budgetYen));
+  // 初期版と同じ: Plackett-Luceの確率順位と配分をそのまま採用。
+  // 後期版の期待値・展開・危険度による再ランキングは挟まない。
+  const generatedBets = generateBets(boats, betType, budgetYen);
+  setBets(generatedBets);
 };
 
   const handleImagesSelected = async (fileList) => {
@@ -1887,7 +1876,7 @@ export default function BoatRaceTool() {
   result.positionReturns
 );
       const normalizedWeather = normalizeWeather(result.weather);
-      const scored = computeScores(normalized, venue, normalizedWeather, adaptiveProfile.weights);
+      const scored = computeScores(normalized, normalizedWeather);
       setBoats(scored);
       setWeather(normalizedWeather);
 
@@ -2312,14 +2301,14 @@ setForecast(generateForecast(scored));
                     <div style={{ fontSize: 11, color: '#7aff9b', fontWeight: 800 }}>★ 狙い艇</div>
                     <div style={{ fontSize: 15, fontWeight: 800 }}>{raceSummary.targetBoat.lane}号艇</div>
                     <div style={{ fontSize: 10, color: '#b9d9c8', lineHeight: 1.4 }}>
-                      {(raceSummary.targetBoat.targetReasons || []).slice(0, 2).join('・') || '総合バランス良好'}
+                      初期総合スコア2位
                     </div>
                   </div>
                   <div style={{ background: '#2a171a', border: '1px solid #8d3f47', borderRadius: 8, padding: 9 }}>
                     <div style={{ fontSize: 11, color: '#ff8b95', fontWeight: 800 }}>⚠ 危険艇</div>
                     <div style={{ fontSize: 15, fontWeight: 800 }}>{raceSummary.dangerBoat.lane}号艇 <span style={{ fontSize: 11, color: '#ff8b95' }}>{getDangerProfile(raceSummary.dangerBoat).stars}</span></div>
                     <div style={{ fontSize: 10, color: '#e4b8bc', lineHeight: 1.45 }}>
-                      {getDangerProfile(raceSummary.dangerBoat).reasons.join('・') || '目立つ危険材料なし'}
+                      初期総合スコア最下位
                     </div>
                   </div>
                 </div>
